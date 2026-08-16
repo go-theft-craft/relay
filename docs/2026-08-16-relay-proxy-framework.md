@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work in a new repository at `/home/ocharnyshevich/pet.projects/go-theft-craft/relay`. Nothing in this plan modifies `minecraft-protocol`.
+- Work in a new `relay` repository, checked out alongside `minecraft-protocol` so the relative paths below resolve. Nothing in this plan modifies `minecraft-protocol`.
 - Module path `github.com/go-theft-craft/relay`. Go version `1.26.6`.
 - **The core module's `go.mod` must contain no `require` and no `replace` line.** Task 1 adds a CI check that fails the build otherwise. Every later task must keep it passing.
 - Run every command as `devbox run -- task <name>`. Never call `go` directly.
@@ -67,8 +67,8 @@ Example module, `examples/`:
 - [ ] **Step 1: Create the repository and module**
 
 ```bash
-mkdir -p /home/ocharnyshevich/pet.projects/go-theft-craft/relay
-cd /home/ocharnyshevich/pet.projects/go-theft-craft/relay
+mkdir -p relay
+cd relay
 git init
 printf 'module github.com/go-theft-craft/relay\n\ngo 1.26.6\n' > go.mod
 ```
@@ -2175,7 +2175,7 @@ This example depends on nothing outside the standard library — `crypto/aes` an
 - [ ] **Step 1: Create the example module**
 
 ```bash
-cd /home/ocharnyshevich/pet.projects/go-theft-craft/relay/examples
+cd examples
 printf 'module github.com/go-theft-craft/relay/examples\n\ngo 1.26.6\n' > go.mod
 ```
 
@@ -2299,7 +2299,7 @@ The API this task builds on, confirmed against the current tree:
 Task 13 created `examples/go.mod` and wired `test:examples` into `verify`. This task only adds what the Minecraft example needs:
 
 ```bash
-cd /home/ocharnyshevich/pet.projects/go-theft-craft/relay/examples
+cd examples
 go get github.com/go-theft-craft/minecraft-protocol@latest
 ```
 
