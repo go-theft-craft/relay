@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
+  "packages": {
+    "github:openserbia/go-flake#go_1_26_6":            "",
+    "github:openserbia/go-flake#golangci-lint_2_12_2": "",
+    "github:openserbia/go-flake#gofumpt_0_10_0":       "",
+    "github:openserbia/go-flake#govulncheck_1_6_0":    "",
+    "github:openserbia/go-flake#gopls_0_22_0":         "",
+    "github:openserbia/go-flake#delve_1_27_0":         "",
+    "go-task":                                         "latest",
+    "gci":                                             "latest",
+    "gitleaks":                                        "8.30.1"
+  },
+  "env": {
+    "GOROOT": "$DEVBOX_PROJECT_ROOT/.devbox/nix/profile/default/share/go"
+  },
+  "shell": {
+    "init_hook": [
+      "export GOROOT=$(go env GOROOT)",
+      "if git -C \"$DEVBOX_PROJECT_ROOT\" rev-parse --git-dir >/dev/null 2>&1; then git -C \"$DEVBOX_PROJECT_ROOT\" config --local core.hooksPath .githooks; fi"
+    ]
+  }
+}

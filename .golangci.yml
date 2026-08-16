@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - copyloopvar
+    - errname
+    - exhaustive
+    - gocheckcompilerdirectives
+    - gocritic
+    - misspell
+    - nilerr
+    - predeclared
+    - revive
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+
+formatters:
+  enable:
+    - gci
+    - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/go-theft-craft)
+        - prefix(github.com/go-theft-craft/relay)

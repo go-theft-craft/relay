@@ -1,0 +1,92 @@
+version: "3"
+
+vars:
+  MODULE:
+    sh: go list -m
+
+tasks:
+  deps:
+    desc: Download and normalize Go dependencies
+    sources: [go.mod]
+    cmds:
+      - go mod tidy
+
+  deps:check:
+    desc: Assert the core module depends on nothing outside the standard library
+    cmds:
+      - cmd: '! grep -Eq "^[[:space:]]*(require|replace)[[:space:]]" go.mod'
+        platforms: [linux, darwin]
+
+  fmt:
+    desc: Format Go source
+    cmds:
+      - gci write -s standard -s default -s "prefix(github.com/go-theft-craft)" -s "prefix({{.MODULE}})" .
+      - gofumpt -w .
+
+  fmt:check:
+    desc: Check Go formatting without changing files
+    cmds:
+      - |
+        formatting_diff="$(golangci-lint fmt --diff)"
+        if [ -n "$formatting_diff" ]; then
+          printf '%s\n' "$formatting_diff"
+          exit 1
+        fi
+
+  lint:
+    desc: Run static analysis
+    deps: [fmt:check]
+    cmds:
+      - golangci-lint run
+
+  test:
+    desc: Run unit tests with the race detector
+    cmds:
+      - go test -race -covermode=atomic -coverprofile=coverage.out {{.CLI_ARGS | default "./..."}}
+
+  test:examples:
+    desc: Run the example module's tests
+    dir: examples
+    cmds:
+      - go mod tidy
+      - go test -race -count=1 ./...
+
+  secrets:
+    desc: Scan the repository tree for secrets and private keys
+    cmds:
+      - gitleaks dir --no-banner --redact --verbose .
+
+  secrets:staged:
+    desc: Scan staged changes for secrets and private keys
+    cmds:
+      - gitleaks git --no-banner --redact --verbose --staged
+
+  precommit:
+    desc: Run checks required before a commit
+    cmds:
+      - task: deps:check
+      - task: lint
+      - task: secrets:staged
+
+  vuln:
+    desc: Check dependencies for known vulnerabilities
+    cmds:
+      - govulncheck ./...
+
+  build:
+    desc: Build every package
+    cmds:
+      - go build ./...
+
+  verify:
+    desc: Run all local and CI checks
+    cmds:
+      - task: deps:check
+      - task: lint
+      - task: secrets
+      - task: test
+      - task: build
+
+  default:
+    cmds:
+      - task --list
