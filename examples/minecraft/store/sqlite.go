@@ -245,10 +245,10 @@ func (s *SQLite) Message(_ context.Context, id int64, record relay.MessageRecord
 
 // RawChunk implements relay.Sink.
 //
-// Nothing in the core calls this today: the accept path never wraps a
-// connection for byte-level capture. It is implemented anyway so the table
-// exists the day it does, and the emptiness of raw_chunks is the honest answer
-// to whether the method earns its place.
+// It is called only when relay.Config.CaptureRaw is set, and then for every
+// byte crossing the client connection — below any framing, so what lands in
+// raw_chunks is the conversation as it actually appeared on the wire rather
+// than as the codec understood it.
 func (s *SQLite) RawChunk(_ context.Context, id int64, dir relay.Direction, chunk []byte) {
 	s.enqueue(event{
 		kind:      eventRawChunk,

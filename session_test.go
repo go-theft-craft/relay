@@ -20,9 +20,18 @@ type recordingSink struct {
 	mu       sync.Mutex
 	opened   []SessionInfo
 	messages []MessageRecord
+	raw      []rawRecord
 	chunks   int
 	closed   int
 	nextID   int64
+}
+
+// rawRecord is one Sink.RawChunk call, kept with the session it belonged to so
+// a test can prove chunks are attributable.
+type rawRecord struct {
+	id   int64
+	dir  Direction
+	data []byte
 }
 
 func (s *recordingSink) OpenSession(_ context.Context, info SessionInfo) (int64, error) {
@@ -44,11 +53,13 @@ func (s *recordingSink) Message(_ context.Context, _ int64, rec MessageRecord) {
 	s.messages = append(s.messages, rec)
 }
 
-func (s *recordingSink) RawChunk(context.Context, int64, Direction, []byte) {
+func (s *recordingSink) RawChunk(_ context.Context, id int64, dir Direction, chunk []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.chunks++
+	// Borrowed like every other buffer crossing this interface.
+	s.raw = append(s.raw, rawRecord{id: id, dir: dir, data: append([]byte(nil), chunk...)})
 }
 
 func (s *recordingSink) CloseSession(context.Context, int64) {

@@ -162,3 +162,15 @@ func TestConfigRejectsBothCodecForms(t *testing.T) {
 		t.Fatalf("validate() with both Codec and NewCodec = %v, want ErrInvalidConfig", err)
 	}
 }
+
+// TestConfigRejectsCaptureWithoutASink exists because capture with nowhere to
+// put it is a configuration mistake, and a silent no-op would look like a
+// capture that recorded nothing.
+func TestConfigRejectsCaptureWithoutASink(t *testing.T) {
+	cfg := minimalConfig()
+	cfg.CaptureRaw = true
+
+	if err := cfg.validate(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("validate() with CaptureRaw and no Sink = %v, want ErrInvalidConfig", err)
+	}
+}

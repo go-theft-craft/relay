@@ -35,6 +35,9 @@ type MessageRecord struct {
 type Sink interface {
 	OpenSession(context.Context, SessionInfo) (int64, error)
 	Message(context.Context, int64, MessageRecord)
+	// RawChunk receives every byte crossing the client connection, below any
+	// framing and below any mid-stream transform, when Config.CaptureRaw is set.
+	// It is not called at all when it is not.
 	RawChunk(context.Context, int64, Direction, []byte)
 	CloseSession(context.Context, int64)
 }

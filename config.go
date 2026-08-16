@@ -67,6 +67,15 @@ type Config struct {
 	// advancing everyone else's state. Set this or Codec, not both.
 	NewCodec func() (Codec, error)
 
+	// CaptureRaw records every byte crossing the client connection to
+	// Sink.RawChunk, below any framing and below any mid-stream transform.
+	//
+	// It is off by default because it costs a copy per socket read and write,
+	// and because a proxy that is not recording should not pay for one that is.
+	// It requires a Sink: capture with nowhere to put it is a mistake worth
+	// reporting rather than a no-op worth hiding.
+	CaptureRaw bool
+
 	// Hooks run in order on every relayed message. PreFrame runs once, on the
 	// opening bytes of a client connection, before any framing.
 	Hooks    []Hook
@@ -140,6 +149,10 @@ func (c *Config) validate() error {
 				return fmt.Errorf("%w: port %d has an upstream with no address", ErrInvalidConfig, p.Port)
 			}
 		}
+	}
+
+	if c.CaptureRaw && c.Sink == nil {
+		return fmt.Errorf("%w: CaptureRaw needs a Sink to record to", ErrInvalidConfig)
 	}
 
 	if c.Codec != nil && c.NewCodec != nil {

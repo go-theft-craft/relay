@@ -265,6 +265,14 @@ func renderValue(value any) string {
 func runExampleProxy(t *testing.T, upstream string, hooks ...relay.Hook) (addr string, sink *store.SQLite, dbPath string, idle func()) {
 	t.Helper()
 
+	return runExampleProxyWith(t, upstream, false, hooks...)
+}
+
+// runExampleProxyWith is runExampleProxy with raw capture switchable, because
+// capture is off by default and one test needs it on.
+func runExampleProxyWith(t *testing.T, upstream string, capture bool, hooks ...relay.Hook) (addr string, sink *store.SQLite, dbPath string, idle func()) {
+	t.Helper()
+
 	descriptor := protocols.Default()
 
 	limits, err := protocol.NewLimits()
@@ -290,9 +298,10 @@ func runExampleProxy(t *testing.T, upstream string, hooks ...relay.Hook) (addr s
 		NewCodec: func() (relay.Codec, error) {
 			return minecraft.NewCodec(descriptor, limits)
 		},
-		Prober: minecraft.Prober{Descriptor: descriptor, Timeout: 5 * time.Second},
-		Sink:   sink,
-		Hooks:  hooks,
+		Prober:     minecraft.Prober{Descriptor: descriptor, Timeout: 5 * time.Second},
+		Sink:       sink,
+		Hooks:      hooks,
+		CaptureRaw: capture,
 	})
 	if err != nil {
 		t.Fatalf("relay.New: %v", err)
@@ -500,4 +509,61 @@ func openDB(t *testing.T, path string) *sql.DB {
 	t.Cleanup(func() { _ = db.Close() })
 
 	return db
+}
+
+// TestEndToEndRawCapture proves the bytes reach the sink's raw_chunks table,
+// which is what makes Sink.RawChunk part of the interface rather than a hole in
+// it.
+func TestEndToEndRawCapture(t *testing.T) {
+	up := newStubServer(t)
+	addr, sink, dbPath, idle := runExampleProxyWith(t, up.addr(), true)
+
+	if got := statusClient(t, addr); !strings.Contains(got, "the stub upstream") {
+		t.Fatalf("the client was answered with %q, want the stub's document", got)
+	}
+
+	idle()
+
+	if err := sink.Close(); err != nil {
+		t.Fatalf("close the sink: %v", err)
+	}
+
+	db := openDB(t, dbPath)
+
+	var chunks, bytesRecorded int
+	err := db.QueryRow(`SELECT count(*), coalesce(sum(length(bytes)), 0) FROM raw_chunks`).Scan(&chunks, &bytesRecorded)
+	if err != nil {
+		t.Fatalf("count raw chunks: %v", err)
+	}
+	if chunks == 0 {
+		t.Fatal("no raw chunks were recorded with CaptureRaw on")
+	}
+	if bytesRecorded == 0 {
+		t.Fatal("raw chunks were recorded but carried no bytes")
+	}
+
+	// Both directions of the conversation are there, not just the one that
+	// happened to be flushed first.
+	for _, dir := range []string{"to_server", "to_client"} {
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM raw_chunks WHERE direction = ?`, dir).Scan(&n); err != nil {
+			t.Fatalf("count %s chunks: %v", dir, err)
+		}
+		if n == 0 {
+			t.Fatalf("no %s chunks were recorded", dir)
+		}
+	}
+
+	// Every chunk belongs to a session row, which is what makes a capture
+	// replayable rather than a pile of bytes.
+	var orphans int
+	err = db.QueryRow(
+		`SELECT count(*) FROM raw_chunks WHERE session_id NOT IN (SELECT id FROM sessions)`,
+	).Scan(&orphans)
+	if err != nil {
+		t.Fatalf("count orphan chunks: %v", err)
+	}
+	if orphans != 0 {
+		t.Fatalf("%d raw chunks are not attached to any session", orphans)
+	}
 }

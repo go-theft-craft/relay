@@ -2,9 +2,11 @@ package relay
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -693,5 +695,191 @@ func TestProxyPreFrameHandledOpensNoRecord(t *testing.T) {
 
 	if opened != 0 || closed != 0 {
 		t.Fatalf("a handled connection produced %d opens and %d closes, want none of either", opened, closed)
+	}
+}
+
+// rawChunks returns the recorded raw bytes joined per direction, which is how a
+// capture is actually read back: as two streams, not as a list of syscalls.
+func (s *recordingSink) rawStreams() (toServer, toClient []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, c := range s.raw {
+		if c.dir == ToServer {
+			toServer = append(toServer, c.data...)
+
+			continue
+		}
+
+		toClient = append(toClient, c.data...)
+	}
+
+	return toServer, toClient
+}
+
+func TestProxyCapturesRawBytes(t *testing.T) {
+	up := newEchoUpstream(t)
+	sink := &recordingSink{}
+
+	p, _, _ := runProxy(t, Config{
+		Ports:      []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		Sink:       sink,
+		CaptureRaw: true,
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	writeLine(t, conn, "hello")
+
+	if got := readLine(t, bufio.NewReader(conn)); got != "hello" {
+		t.Fatalf("got %q, want hello", got)
+	}
+
+	waitFor(t, func() bool {
+		toServer, toClient := sink.rawStreams()
+
+		return len(toServer) > 0 && len(toClient) > 0
+	})
+
+	toServer, toClient := sink.rawStreams()
+	if string(toServer) != "hello\n" {
+		t.Fatalf("captured to_server %q, want the framed bytes the client sent", toServer)
+	}
+	if string(toClient) != "hello\n" {
+		t.Fatalf("captured to_client %q, want the framed bytes the client received", toClient)
+	}
+
+	// Every chunk must belong to the session that produced it.
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	for _, c := range sink.raw {
+		if c.id == 0 {
+			t.Fatal("a raw chunk was recorded against session 0, so it cannot be joined to a session row")
+		}
+	}
+}
+
+// TestProxyCapturesBytesReadBeforeTheSessionOpened is the case the buffering
+// exists for. A pre-frame hook reads from the socket before there is a sink
+// session to attach anything to, and a capture that started later would be
+// missing exactly the bytes that opened the conversation.
+func TestProxyCapturesBytesReadBeforeTheSessionOpened(t *testing.T) {
+	up := newEchoUpstream(t)
+	sink := &recordingSink{}
+
+	p, _, _ := runProxy(t, Config{
+		Ports:      []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		Sink:       sink,
+		CaptureRaw: true,
+		PreFrame: PreFrameFunc(func(_ context.Context, _ *Session, br *bufio.Reader) (PreFrameResult, error) {
+			// Peeking still pulls the bytes off the socket, which is where the
+			// capture sits.
+			if _, err := br.Peek(6); err != nil {
+				return Continue, err
+			}
+
+			return Continue, nil
+		}),
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	writeLine(t, conn, "opener")
+	_ = readLine(t, bufio.NewReader(conn))
+
+	waitFor(t, func() bool {
+		toServer, _ := sink.rawStreams()
+
+		return len(toServer) >= len("opener\n")
+	})
+
+	toServer, _ := sink.rawStreams()
+	if string(toServer) != "opener\n" {
+		t.Fatalf("captured %q, want the opening bytes the pre-frame hook had already read", toServer)
+	}
+}
+
+// TestProxyCapturesNothingWhenOff keeps the cost off the default path.
+func TestProxyCapturesNothingWhenOff(t *testing.T) {
+	up := newEchoUpstream(t)
+	sink := &recordingSink{}
+
+	p, _, _ := runProxy(t, Config{
+		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		Sink:  sink,
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	writeLine(t, conn, "hello")
+	_ = readLine(t, bufio.NewReader(conn))
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	if len(sink.raw) != 0 {
+		t.Fatalf("%d raw chunks were recorded with CaptureRaw off", len(sink.raw))
+	}
+}
+
+// TestProxyCaptureRecordsPostTransformBytes proves the capture sits below a
+// mid-stream transform: what it stores is what was on the wire, not the
+// plaintext the framer handled.
+func TestProxyCaptureRecordsPostTransformBytes(t *testing.T) {
+	up := newEchoUpstream(t)
+	sink := &recordingSink{}
+
+	swapped := make(chan error, 1)
+
+	p, _, _ := runProxy(t, Config{
+		Ports:      []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		Sink:       sink,
+		CaptureRaw: true,
+		Hooks: []Hook{HookFunc(func(_ context.Context, s *Session, m *Message) (Action, error) {
+			// Only the client's own trigger, and only once. Matching both
+			// directions would fire again on the echo, after the swap had already
+			// changed what an echo looks like.
+			if m.Dir != ToServer || string(m.Raw) != "START" {
+				return Forward, nil
+			}
+
+			// Encipher only what the proxy writes to the client from here on.
+			swapped <- s.Swap(ToClient, Transform{Write: flipped})
+
+			// Dropped rather than forwarded, so no echo of it crosses the
+			// boundary this hook just moved.
+			return Drop, nil
+		})},
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+
+	writeLine(t, conn, "START")
+	if err := <-swapped; err != nil {
+		t.Fatalf("Swap: %v", err)
+	}
+
+	writeLine(t, conn, "after")
+
+	// The client now reads transformed bytes, so it reads them raw.
+	got := make([]byte, len("after\n"))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if !bytes.Equal(got, flipped([]byte("after\n"))) {
+		t.Fatalf("the client received %q, want the transformed form", got)
+	}
+
+	waitFor(t, func() bool {
+		toServer, toClient := sink.rawStreams()
+
+		return len(toServer) >= len("START\nafter\n") && len(toClient) > 0
+	})
+
+	toServer, toClient := sink.rawStreams()
+
+	if string(toServer) != "START\nafter\n" {
+		t.Fatalf("captured to_server %q, want both lines as the client sent them", toServer)
+	}
+	if !bytes.Equal(toClient, flipped([]byte("after\n"))) {
+		t.Fatalf("captured to_client %q, want the transformed bytes — the capture must sit below the transform", toClient)
 	}
 }

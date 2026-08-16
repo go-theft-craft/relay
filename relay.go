@@ -236,6 +236,15 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 		OpenedAt:   time.Now(),
 	}
 
+	// The capture wraps the connection before anything reads from it, so the
+	// bytes a pre-frame hook consumes are recorded too. It holds them until
+	// there is a sink session to attach them to.
+	var capture *captureConn
+	if p.cfg.CaptureRaw {
+		capture = newCaptureConn(ctx, client, p.cfg.Sink)
+		client = capture
+	}
+
 	// The session exists before the upstream does, so a PreFrame hook and an
 	// upstream failure both have something to be reported against.
 	s := newSession(ctx, &p.cfg, client, nil, info, 0)
@@ -294,6 +303,13 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 	}
 
 	s.sinkID = sinkID
+
+	if capture != nil && capture.activate(sinkID) {
+		p.cfg.OnSessionError(s, fmt.Errorf(
+			"relay: raw capture dropped bytes before the session opened; over %d were buffered",
+			capturePendingLimit,
+		))
+	}
 
 	p.reg.add(s)
 	s.onFinish = func() {

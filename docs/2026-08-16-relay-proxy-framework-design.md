@@ -456,17 +456,27 @@ selector that routes on anything else about the connection — a TLS peer
 certificate, a local address on a multi-homed host — would have no way back to
 it, and the parameter costs nothing.
 
-**Does `Sink.RawChunk` earn its place?** Not yet, and this should be said
-plainly rather than left for a reader to re-derive: **nothing in the core calls
-it.** The accept path never wraps a connection for byte-level capture, so the
-method is dead weight on every `Sink` implementation, which must still supply an
-empty body for it. The SQLite sink in the example implements it and its
-`raw_chunks` table is always empty.
+**Does `Sink.RawChunk` earn its place?** It does now. It did not at `v0.1.0`,
+where nothing in the core called it and it was dead weight on every `Sink`
+implementation. `Config.CaptureRaw` wires it: the client connection is wrapped
+before anything reads from it, and every byte crossing it is recorded below any
+framing and below any mid-stream transform.
 
-It is kept for now because removing it is a breaking change to the one interface
-consumers implement most often, and the decision is better made with a consumer
-that wants raw capture in hand. If none appears before the API stabilises,
-delete it.
+Two details the implementation had to settle, both of which are the interesting
+part:
+
+- **Capture starts before there is anything to attach it to.** The sink
+  identifier only exists once the upstream is joined, but a pre-frame hook reads
+  from the socket well before that. The wrapper holds those bytes and flushes
+  them when the session opens, under a bound — an unbounded buffer on the accept
+  path is how a proxy holding thousands of connections runs out of memory. A
+  capture that simply started later would be missing exactly the bytes that
+  opened the conversation.
+- **Only the client connection is wrapped.** What a capture is for is replaying
+  the session a client had. The upstream link carries the same messages,
+  possibly under a different encoding, and recording both would double the
+  storage to say the same thing twice. Adding an upstream-side flag later is
+  additive.
 
 ## As built: where the implementation diverged
 
@@ -552,4 +562,5 @@ rather than made.
 - **The `Sink` no-blocking contract is stated, not enforced.** A sink that
   blocks stalls a read pump and, through backpressure, its peer. The SQLite
   example drops and counts rather than blocking; nothing makes it.
-- **`RawChunk`, as above.** Delete it or wire capture; do not leave it.
+- **Upstream-side capture.** Only the client connection is recorded. Nothing has
+  needed the other side yet, and adding it is additive when something does.

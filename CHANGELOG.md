@@ -5,6 +5,24 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+## Unreleased
+
+### Added
+
+- `Config.CaptureRaw`, which wires `Sink.RawChunk`: every byte crossing the
+  client connection is recorded, below any framing and below any mid-stream
+  transform. Off by default. It requires a `Sink` — capture with nowhere to put
+  it is reported as `ErrInvalidConfig` rather than silently doing nothing.
+
+  Bytes read before the session has a sink identifier — everything a `PreFrame`
+  hook consumes — are held and flushed once it does, under a bound, so a capture
+  is not missing the bytes that opened the conversation.
+
+  This closes the `v0.1.0` note below: `Sink.RawChunk` is no longer dead.
+
+- `examples/minecraft/cmd/mcrelay` grew a `-capture` flag, and the SQLite sink's
+  `raw_chunks` table is populated when it is set.
+
 ## [0.1.0] — 2026-08-16
 
 The initial API. A proxy framework for any length-prefixed or delimited byte
@@ -52,8 +70,8 @@ protocol, with a `go.mod` that requires nothing outside the standard library.
 - Every configured port is bound, including one whose upstreams are all dead, so
   a client there sees connect-then-drop rather than connection refused. This is
   the accepted consequence of resolving health lazily rather than at startup.
-- `Sink.RawChunk` is part of the interface but nothing in the core calls it:
-  the accept path never wraps a connection for byte-level capture. It is a
-  candidate for removal before the API stabilises.
+- `Sink.RawChunk` is part of the interface but nothing in this version calls
+  it: the accept path never wraps a connection for byte-level capture. Wired in
+  the next release; see Unreleased above.
 - `examples/` is a separate module. Nothing it imports reaches a consumer of the
   core.

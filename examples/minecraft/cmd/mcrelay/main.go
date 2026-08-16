@@ -43,6 +43,7 @@ func run() error {
 		dbPath    = flag.String("db", "relay.db", "SQLite database to record to")
 		logLevel  = flag.String("log", "info", "log level: debug, info, warn, error")
 		drain     = flag.Duration("drain", 5*time.Second, "how long a closing session may finish an in-flight write")
+		capture   = flag.Bool("capture", false, "record every raw byte of the client connection, not just decoded messages")
 	)
 	flag.Parse()
 
@@ -105,9 +106,12 @@ func run() error {
 		},
 		// Health that means the server answered, rather than that something
 		// holds the port open.
-		Prober:     minecraft.Prober{Descriptor: descriptor, Timeout: 3 * time.Second},
-		Sink:       sink,
-		Selector:   relay.FirstHealthy(),
+		Prober:   minecraft.Prober{Descriptor: descriptor, Timeout: 3 * time.Second},
+		Sink:     sink,
+		Selector: relay.FirstHealthy(),
+		// Off by default: it costs a copy per socket read and write, and stores
+		// the whole conversation rather than a row per message.
+		CaptureRaw: *capture,
 		Hooks:      []relay.Hook{describePackets(logger)},
 		DrainGrace: *drain,
 		Logger:     logger,

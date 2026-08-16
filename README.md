@@ -80,6 +80,7 @@ func main() {
 | `Codec` | typed packets in hooks and sinks, and re-encoding after an edit |
 | `Prober` | health that means the server answered, not that a port is open |
 | `Sink` | a record of what crossed the wire, including what the proxy injected |
+| `Config.CaptureRaw` | every raw byte of the client connection, below framing |
 | `Hook` | inspect, rewrite, drop, or inject a message |
 | `PreFrame` | answer or divert a connection before any framing happens |
 
@@ -135,6 +136,25 @@ Two things the swap guarantees, and one it does not:
   forbids sending across the switch, because both endpoints have the identical
   problem. A proxy that swaps at the same message an endpoint would is exactly
   as correct as that endpoint, and no more.
+
+## Raw capture
+
+`Config.CaptureRaw` records every byte crossing the client connection to
+`Sink.RawChunk`, below any framing and below any mid-stream transform — so what
+is stored is the conversation as it appeared on the wire, not as the codec
+understood it. It is off by default, because it costs a copy per socket read and
+write.
+
+Only the client connection is wrapped. What a capture is for is replaying the
+session a client had; the upstream link carries the same messages, possibly
+under a different encoding, and recording both would double the storage to say
+the same thing twice.
+
+Capture starts before the sink has a session to attach it to — a `PreFrame` hook
+reads from the socket well before an upstream is joined — so those opening bytes
+are held and flushed once the session opens, under a bound. A capture that
+simply started later would be missing exactly the bytes that opened the
+conversation.
 
 ## Upstreams and health
 
