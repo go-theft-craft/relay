@@ -52,7 +52,7 @@ tasks:
     dir: examples
     cmds:
       - go mod tidy
-      - go test -race -count=1 ./...
+      - go test -race -timeout 120s -count=1 {{.CLI_ARGS | default "./..."}}
 
   secrets:
     desc: Scan the repository tree for secrets and private keys
@@ -88,6 +88,7 @@ tasks:
       - task: lint
       - task: secrets
       - task: test
+      - task: test:examples
       - task: build
 
   default:
