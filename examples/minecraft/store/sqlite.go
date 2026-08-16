@@ -9,6 +9,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -418,12 +419,21 @@ func stamp(t time.Time) string {
 }
 
 // summarise renders a decoded packet for the text column, bounded.
+//
+// JSON first, and %+v only as a fallback, because a decoded packet is usually a
+// struct holding a pointer to a generated value — and %+v renders that pointer
+// as an address. A capture column full of 0xc000c0ffee is worse than an empty
+// one, because it looks like it worked.
 func summarise(decoded any) string {
 	if decoded == nil {
 		return ""
 	}
 
 	text := fmt.Sprintf("%+v", decoded)
+	if encoded, err := json.Marshal(decoded); err == nil {
+		text = string(encoded)
+	}
+
 	if len(text) > decodedSummaryLimit {
 		var b strings.Builder
 

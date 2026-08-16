@@ -119,7 +119,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("mcrelay listening",
+	logger.Info(
+		"mcrelay listening",
 		slog.Any("ports", ports),
 		slog.String("protocol", descriptor.ID()),
 		slog.String("db", *dbPath),
@@ -129,7 +130,8 @@ func run() error {
 		return err
 	}
 
-	logger.Info("mcrelay stopped",
+	logger.Info(
+		"mcrelay stopped",
 		slog.Int("live_sessions", proxy.SessionCount()),
 		slog.Uint64("dropped_records", sink.Dropped()),
 	)
@@ -146,7 +148,8 @@ func run() error {
 // worked consumer in examples/cipher.
 func describePackets(logger *slog.Logger) relay.Hook {
 	return relay.HookFunc(func(_ context.Context, s *relay.Session, m *relay.Message) (relay.Action, error) {
-		logger.Debug("packet",
+		logger.Debug(
+			"packet",
 			slog.Int64("session", s.ID),
 			slog.String("dir", m.Dir.String()),
 			slog.Int("id", int(m.Desc.ID)),

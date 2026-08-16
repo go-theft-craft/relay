@@ -236,22 +236,14 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 		OpenedAt:   time.Now(),
 	}
 
-	sinkID, err := p.cfg.Sink.OpenSession(ctx, info)
-	if err != nil {
-		p.reportEarly(info, fmt.Errorf("relay: open sink session: %w", err))
-
-		return
-	}
-
 	// The session exists before the upstream does, so a PreFrame hook and an
 	// upstream failure both have something to be reported against.
-	s := newSession(ctx, &p.cfg, client, nil, info, sinkID)
+	s := newSession(ctx, &p.cfg, client, nil, info, 0)
 
 	if p.cfg.NewCodec != nil {
 		codec, err := p.cfg.NewCodec()
 		if err != nil {
 			p.cfg.OnSessionError(s, fmt.Errorf("relay: build the session codec: %w", err))
-			p.cfg.Sink.CloseSession(ctx, sinkID)
 
 			return
 		}
@@ -263,15 +255,12 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 		result, err := p.cfg.PreFrame.OnConnect(ctx, s, s.clientSide.PreFrameReader())
 		if err != nil {
 			p.cfg.OnSessionError(s, fmt.Errorf("relay: pre-frame hook: %w", err))
-			p.cfg.Sink.CloseSession(ctx, sinkID)
 
 			return
 		}
 		if result == Handled {
 			// The hook answered the connection itself. No upstream is dialled,
 			// which is the whole point of returning Handled.
-			p.cfg.Sink.CloseSession(ctx, sinkID)
-
 			return
 		}
 	}
@@ -279,12 +268,32 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 	upstream, addr, err := p.resolve(ctx, port, client)
 	if err != nil {
 		p.cfg.OnSessionError(s, err)
-		p.cfg.Sink.CloseSession(ctx, sinkID)
 
 		return
 	}
 
 	s.joinUpstream(upstream, addr)
+
+	// The sink is told about the session once it is a session: two connections
+	// joined.
+	//
+	// Opening the record earlier — before the upstream is resolved, which is the
+	// obvious reading of the accept order — means every row a sink ever writes
+	// has an empty upstream address, because that is genuinely not known yet. It
+	// also puts OpenSession and CloseSession on different paths, so a connection
+	// rejected at the pre-frame hook opens a record that nothing closes. Pairing
+	// them here costs the recording of connections that never found an upstream;
+	// those reach Config.OnSessionError instead, which is where a failure to
+	// route belongs.
+	sinkID, err := p.cfg.Sink.OpenSession(ctx, s.Info)
+	if err != nil {
+		p.cfg.OnSessionError(s, fmt.Errorf("relay: open sink session: %w", err))
+		_ = upstream.Close()
+
+		return
+	}
+
+	s.sinkID = sinkID
 
 	p.reg.add(s)
 	s.onFinish = func() {
@@ -381,10 +390,4 @@ func filterByAddr(up []Upstream, keep []string) []Upstream {
 	}
 
 	return out
-}
-
-// reportEarly reports a fault from before there was a session to report it
-// against.
-func (p *Proxy) reportEarly(info SessionInfo, err error) {
-	p.cfg.OnSessionError(&Session{Info: info, cfg: &p.cfg}, err)
 }

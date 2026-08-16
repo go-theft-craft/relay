@@ -187,7 +187,8 @@ func (c *Config) validate() error {
 	if c.OnSessionError == nil {
 		logger := c.Logger
 		c.OnSessionError = func(s *Session, err error) {
-			logger.Warn("relay: session ended with an error",
+			logger.Warn(
+				"relay: session ended with an error",
 				slog.String("client", s.Info.ClientAddr),
 				slog.String("upstream", s.Info.UpstreamAddr),
 				slog.Any("err", err),

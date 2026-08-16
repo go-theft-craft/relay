@@ -44,7 +44,8 @@ func newFramer(t *testing.T, limits protocol.Limits) *minecraft.Framer {
 func TestFramerContract(t *testing.T) {
 	limits := testLimits(t)
 
-	relaytest.FramerContract(t,
+	relaytest.FramerContract(
+		t,
 		func() relay.Framer { return newFramer(t, limits) },
 		[][]byte{
 			// One byte, so the length prefix is a single VarInt byte.

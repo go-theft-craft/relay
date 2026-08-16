@@ -622,3 +622,76 @@ func TestProxyReportsACodecThatCannotBeBuilt(t *testing.T) {
 		t.Fatalf("the upstream saw %d connections, want none — setup failed before the dial", n)
 	}
 }
+
+// TestProxySinkSeesTheUpstream pins when a session is opened on the sink. The
+// record is written once the two connections are joined, so the upstream
+// address in it is the one actually dialled rather than an empty string.
+func TestProxySinkSeesTheUpstream(t *testing.T) {
+	up := newEchoUpstream(t)
+	sink := &recordingSink{}
+
+	p, _, _ := runProxy(t, Config{
+		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		Sink:  sink,
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	writeLine(t, conn, "hello")
+	_ = readLine(t, bufio.NewReader(conn))
+
+	waitFor(t, func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+
+		return len(sink.opened) == 1
+	})
+
+	sink.mu.Lock()
+	opened := sink.opened[0]
+	sink.mu.Unlock()
+
+	if opened.UpstreamAddr != up.addr() {
+		t.Fatalf("OpenSession saw upstream %q, want %q", opened.UpstreamAddr, up.addr())
+	}
+	if opened.ClientAddr == "" {
+		t.Fatal("OpenSession saw no client address")
+	}
+}
+
+// TestProxyPreFrameHandledOpensNoRecord is the other half of that pairing. A
+// connection answered before an upstream was dialled never became a session, so
+// opening a record nothing would close would leave a permanently half-open row.
+func TestProxyPreFrameHandledOpensNoRecord(t *testing.T) {
+	up := newEchoUpstream(t)
+	sink := &recordingSink{}
+
+	p, _, _ := runProxy(t, Config{
+		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		Sink:  sink,
+		PreFrame: PreFrameFunc(func(_ context.Context, s *Session, br *bufio.Reader) (PreFrameResult, error) {
+			if _, err := br.ReadString('\n'); err != nil {
+				return Continue, err
+			}
+			if _, err := s.Client.Write([]byte("PONG\n")); err != nil {
+				return Handled, err
+			}
+
+			return Handled, nil
+		}),
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	writeLine(t, conn, "PING")
+
+	if got := readLine(t, bufio.NewReader(conn)); got != "PONG" {
+		t.Fatalf("got %q, want PONG", got)
+	}
+
+	sink.mu.Lock()
+	opened, closed := len(sink.opened), sink.closed
+	sink.mu.Unlock()
+
+	if opened != 0 || closed != 0 {
+		t.Fatalf("a handled connection produced %d opens and %d closes, want none of either", opened, closed)
+	}
+}

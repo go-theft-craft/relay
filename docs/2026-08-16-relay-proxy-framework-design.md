@@ -1,7 +1,9 @@
 # `relay`: a protocol-agnostic proxy framework
 
-- Status: Draft for review
-- Date: 2026-08-16
+- Status: Built. This records a design that exists rather than proposing one;
+  every place the implementation diverged from the proposal is marked "As
+  built" below.
+- Date: 2026-08-16 (reconciled after implementation)
 - Repository: `relay` (new, public)
 - Related: `minecraft-protocol`, used by relay's worked example and depended on
   by neither module in either direction
@@ -443,9 +445,111 @@ upstream, asserting the expected rows land in SQLite.
 CI runs both modules separately, plus the assertion that the core's require
 block is empty.
 
-## Open questions
+## Resolved questions
 
-None blocking. The two calls most worth revisiting after the example is written
-are whether `Selector` needs the `net.Conn` (it is there for sticky routing, and
-nothing else uses it) and whether `Sink.RawChunk` earns its place once capture
-is wired through a real consumer.
+Both open questions have answers now that the worked examples exist.
+
+**Does `Selector` need the `net.Conn`?** Yes, but only just. `StickyByClientIP`
+is the only built-in that reads it, and it reads only `RemoteAddr`. Narrowing
+the parameter to a `net.Addr` was considered and rejected: a consumer writing a
+selector that routes on anything else about the connection — a TLS peer
+certificate, a local address on a multi-homed host — would have no way back to
+it, and the parameter costs nothing.
+
+**Does `Sink.RawChunk` earn its place?** Not yet, and this should be said
+plainly rather than left for a reader to re-derive: **nothing in the core calls
+it.** The accept path never wraps a connection for byte-level capture, so the
+method is dead weight on every `Sink` implementation, which must still supply an
+empty body for it. The SQLite sink in the example implements it and its
+`raw_chunks` table is always empty.
+
+It is kept for now because removing it is a breaking change to the one interface
+consumers implement most often, and the decision is better made with a consumer
+that wants raw capture in hand. If none appears before the API stabilises,
+delete it.
+
+## As built: where the implementation diverged
+
+Six places. Each was found by writing the thing, and each is a correction to
+this document rather than a compromise in the code.
+
+**A codec is per session, not per proxy.** The design put `Codec` on `Config`,
+one instance for the process. That only suits a codec that is a pure function of
+its bytes. The Minecraft example's codec holds a state machine and a decoder per
+direction, all belonging to one connection, so a shared instance would have
+every client advancing everyone else's handshake. `Config.NewCodec func() (Codec,
+error)` was added alongside `Config.Codec`; setting both is `ErrInvalidConfig`.
+
+**The sink learns about a session after the upstream is joined.** The design's
+accept order opened the sink record before resolving the upstream. That makes
+`SessionInfo.UpstreamAddr` empty in every row a sink ever writes, and it puts
+`OpenSession` and `CloseSession` on different paths — a connection answered by a
+`PreFrame` hook would open a record nothing ever closed. `OpenSession` now runs
+once the two connections are joined. The cost is that connections which never
+found an upstream are not recorded as sessions; they reach
+`Config.OnSessionError`, which is where a failure to route belongs.
+
+**Encoding uses the opposite protocol session from decoding.** Not a change to
+this design, but the least obvious thing the example found. A session's role
+fixes both directions at once, so re-encoding a serverbound packet needs the
+session whose *outbound* is serverbound — the client-role one, not the
+server-role one that decoded it. That is not a workaround; it is what a proxy
+is.
+
+**Re-encoding must honour the packet's own state, not the session's.** The relay
+re-encodes after the whole hook chain, which is necessarily after `Decode`
+advanced the state machine. A hook that edited a handshake would otherwise find
+the session refusing the packet it had just produced.
+
+**`Config.WriteBufferSize` does not exist.** It was in the plan's default table
+and was dropped. Writes go straight to the socket so a message is on the wire
+when `WriteMessage` returns; a write buffer would need a flush at every message
+boundary to preserve that, and a knob whose only correct setting is "flushed
+immediately" is not a knob. `ReadBufferSize` remains.
+
+**`Session.Swap`'s direction names a connection.** `ToClient` is the client
+connection and `ToServer` the upstream one — the same connection a message
+travelling that way is written to, so the direction means the same thing in
+`Swap` as it does everywhere else. This is worth stating because the other
+reading is equally self-consistent and silently wrong: a `Transform` covers both
+halves of one link, and a proxy stands on two links, so a negotiated cipher
+needs two swaps with two independent keystreams. `examples/cipher` is the worked
+form.
+
+## As built: notes on the testing plan
+
+**`relaytest.FramerContract` was strengthened.** As specified, `bufferIsOwned`
+read the same message twice, so a framer that reuses its buffer refilled it with
+identical bytes and passed. It now also compares backing-array identity, which
+is payload-agnostic. Verified against a deliberately broken framer.
+
+**One planned mutation is not observable.** The plan asked that removing the
+payload copy from the Minecraft framer be caught by the harness. It is not, and
+cannot be: the underlying `ReadFrame` allocates a fresh buffer per frame, so two
+live payloads never alias and no black-box test distinguishes a copy from a view
+into new memory. The copy honours the documented borrow contract rather than
+fixing an observed bug, and the code says so, so that nobody removes it as dead
+weight.
+
+**The handshake advances both decoders.** The plan expected it to move only the
+serverbound one. It has to move both: the server's very next packet is a
+clientbound status response, so a clientbound decoder left in the handshaking
+state could not decode the reply to the handshake just read.
+
+## Recorded for the other repository
+
+This design commits to documenting the panic-recovery divergence in both
+places. `relay` holds up its half: `(*Session).callHook` names the divergence
+and its reason in its doc comment. The matching sentence belongs in
+`minecraft-protocol/router`, whose deliberate *non*-recovery of handler panics
+is the other side of it, and that edit is out of scope here. It is recorded
+rather than made.
+
+## Still open, for the first migration
+
+- **Un-swapping.** `Transform` only ever composes. Nothing here supports
+  removing a layer, because nothing needed it yet.
+- **The `Sink` no-blocking contract is stated, not enforced.** A sink that
+  blocks stalls a read pump and, through backpressure, its peer. The SQLite
+  example drops and counts rather than blocking; nothing makes it.
+- **`RawChunk`, as above.** Delete it or wire capture; do not leave it.
