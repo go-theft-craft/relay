@@ -55,6 +55,12 @@ type Session struct {
 	cfg    *Config
 	sinkID int64
 
+	// codec is this session's decoder. It is per session rather than read from
+	// the config on every message because a real protocol codec carries
+	// connection state — a state machine, a pair of decoders — and sharing one
+	// across sessions would have every client advancing everyone else's.
+	codec Codec
+
 	// clientSide and upstreamSide are the byte layers over the two connections.
 	// A message travelling ToClient is written to clientSide and a message
 	// travelling ToServer is read from it, which is why a pump reads from the
@@ -98,6 +104,7 @@ func newSession(parent context.Context, cfg *Config, client, upstream net.Conn, 
 		Client:        client,
 		Info:          info,
 		cfg:           cfg,
+		codec:         cfg.Codec,
 		sinkID:        sinkID,
 		clientSide:    NewConduit(client, cfg.ReadBufferSize),
 		clientWrite:   make(chan struct{}, 1),
@@ -255,11 +262,11 @@ func (s *Session) Inject(dir Direction, raw []byte) error {
 // It returns ErrInvalidConfig when no codec is configured, because the
 // alternative is a silent no-op on a call that read like it sent something.
 func (s *Session) InjectDecoded(dir Direction, value any) error {
-	if s.cfg.Codec == nil {
+	if s.codec == nil {
 		return fmt.Errorf("%w: InjectDecoded needs a Codec", ErrInvalidConfig)
 	}
 
-	raw, err := s.cfg.Codec.Encode(value)
+	raw, err := s.codec.Encode(value)
 	if err != nil {
 		return fmt.Errorf("relay: encode injected message: %w", err)
 	}
@@ -431,11 +438,11 @@ func (s *Session) relay(dir Direction, raw []byte) error {
 // session: a codec that cannot read this traffic will fail on every message,
 // and the first report is the only informative one.
 func (s *Session) decode(m *Message) {
-	if s.cfg.Codec == nil {
+	if s.codec == nil {
 		return
 	}
 
-	value, desc, err := s.cfg.Codec.Decode(m.Dir, m.Raw)
+	value, desc, err := s.codec.Decode(m.Dir, m.Raw)
 	if err != nil {
 		if s.decodeErrLogged.CompareAndSwap(false, true) {
 			s.cfg.OnSessionError(s, fmt.Errorf("relay: decode %s: %w (relaying opaquely from here)", m.Dir, err))
@@ -457,11 +464,11 @@ func (s *Session) finalBytes(m *Message) ([]byte, error) {
 		return m.Raw, nil
 	}
 
-	if s.cfg.Codec == nil {
+	if s.codec == nil {
 		return nil, fmt.Errorf("%w: a hook set a decoded value but no Codec is configured", ErrHook)
 	}
 
-	encoded, err := s.cfg.Codec.Encode(m.Decoded)
+	encoded, err := s.codec.Encode(m.Decoded)
 	if err != nil {
 		return nil, fmt.Errorf("%w: re-encode: %w", ErrHook, err)
 	}

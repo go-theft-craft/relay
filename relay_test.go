@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -562,5 +563,62 @@ func TestProxyListsLiveSessions(t *testing.T) {
 	}
 	if got := p.UpstreamCount(up.addr()); got != 1 {
 		t.Fatalf("UpstreamCount = %d, want 1", got)
+	}
+}
+
+// TestProxyBuildsACodecPerSession covers the config seam a stateful codec
+// needs. A codec that carries connection state — a handshake, a per-direction
+// decoder — must not be shared, or every client advances everyone else's.
+func TestProxyBuildsACodecPerSession(t *testing.T) {
+	up := newEchoUpstream(t)
+
+	var built atomic.Int64
+
+	p, _, _ := runProxy(t, Config{
+		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		NewCodec: func() (Codec, error) {
+			built.Add(1)
+
+			return &countingCodec{}, nil
+		},
+	})
+
+	addr := onlyAddr(t, p)
+
+	for range 3 {
+		conn := dial(t, addr)
+		writeLine(t, conn, "hello")
+
+		if got := readLine(t, bufio.NewReader(conn)); got != "hello" {
+			t.Fatalf("got %q, want hello", got)
+		}
+	}
+
+	if n := built.Load(); n != 3 {
+		t.Fatalf("NewCodec ran %d times for 3 sessions, want 3", n)
+	}
+}
+
+// TestProxyReportsACodecThatCannotBeBuilt keeps a failure at session setup from
+// becoming a session that silently relays undecoded.
+func TestProxyReportsACodecThatCannotBeBuilt(t *testing.T) {
+	up := newEchoUpstream(t)
+
+	p, _, sessionErrs := runProxy(t, Config{
+		Ports:    []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		NewCodec: func() (Codec, error) { return nil, errors.New("no codec today") },
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	buf := make([]byte, 1)
+	_, _ = conn.Read(buf)
+
+	if err := nextSessionError(t, sessionErrs); !strings.Contains(err.Error(), "no codec today") {
+		t.Fatalf("reported %v, want the codec's own error", err)
+	}
+	if n := up.connections(); n != 0 {
+		t.Fatalf("the upstream saw %d connections, want none — setup failed before the dial", n)
 	}
 }

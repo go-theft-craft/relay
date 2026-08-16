@@ -247,6 +247,18 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 	// upstream failure both have something to be reported against.
 	s := newSession(ctx, &p.cfg, client, nil, info, sinkID)
 
+	if p.cfg.NewCodec != nil {
+		codec, err := p.cfg.NewCodec()
+		if err != nil {
+			p.cfg.OnSessionError(s, fmt.Errorf("relay: build the session codec: %w", err))
+			p.cfg.Sink.CloseSession(ctx, sinkID)
+
+			return
+		}
+
+		s.codec = codec
+	}
+
 	if p.cfg.PreFrame != nil {
 		result, err := p.cfg.PreFrame.OnConnect(ctx, s, s.clientSide.PreFrameReader())
 		if err != nil {

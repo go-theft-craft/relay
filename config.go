@@ -57,6 +57,16 @@ type Config struct {
 	Sink     Sink
 	Selector Selector
 
+	// NewCodec builds a Codec per session, for the common case where decoding
+	// carries connection state.
+	//
+	// Codec above is one instance shared by every session, which only suits a
+	// codec that is a pure function of its bytes. Most are not: a protocol with
+	// connection states has a state machine per connection, and often a decoder
+	// per direction as well, so one shared instance would have every client
+	// advancing everyone else's state. Set this or Codec, not both.
+	NewCodec func() (Codec, error)
+
 	// Hooks run in order on every relayed message. PreFrame runs once, on the
 	// opening bytes of a client connection, before any framing.
 	Hooks    []Hook
@@ -130,6 +140,10 @@ func (c *Config) validate() error {
 				return fmt.Errorf("%w: port %d has an upstream with no address", ErrInvalidConfig, p.Port)
 			}
 		}
+	}
+
+	if c.Codec != nil && c.NewCodec != nil {
+		return fmt.Errorf("%w: set Codec or NewCodec, not both", ErrInvalidConfig)
 	}
 
 	if c.Prober == nil {

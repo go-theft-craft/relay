@@ -150,3 +150,15 @@ func TestDefaultSessionErrorHandlerDoesNotPanic(t *testing.T) {
 
 	cfg.OnSessionError(&Session{Info: SessionInfo{ClientAddr: "c", UpstreamAddr: "u"}}, errors.New("boom"))
 }
+
+// TestConfigRejectsBothCodecForms exists because the two fields mean different
+// lifetimes, and silently preferring one would make the other look broken.
+func TestConfigRejectsBothCodecForms(t *testing.T) {
+	cfg := minimalConfig()
+	cfg.Codec = &countingCodec{}
+	cfg.NewCodec = func() (Codec, error) { return &countingCodec{}, nil }
+
+	if err := cfg.validate(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("validate() with both Codec and NewCodec = %v, want ErrInvalidConfig", err)
+	}
+}
