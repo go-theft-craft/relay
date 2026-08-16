@@ -64,7 +64,7 @@ Example module, `examples/`:
 **Interfaces:**
 - Produces: a buildable empty module and the `task deps:check` gate every later task must keep green.
 
-- [ ] **Step 1: Create the repository and module**
+- [x] **Step 1: Create the repository and module**
 
 ```bash
 mkdir -p relay
@@ -73,7 +73,7 @@ git init
 printf 'module github.com/go-theft-craft/relay\n\ngo 1.26.6\n' > go.mod
 ```
 
-- [ ] **Step 2: Copy the toolchain files**
+- [x] **Step 2: Copy the toolchain files**
 
 Copy `devbox.json` from `../minecraft-protocol/devbox.json` verbatim, then delete the `"nodejs": "24"` entry — the core module has no Node interop.
 
@@ -84,7 +84,7 @@ cp ../minecraft-protocol/LICENSE ./LICENSE
 
 Edit `devbox.json` to remove the `nodejs` line.
 
-- [ ] **Step 3: Write the Taskfile**
+- [x] **Step 3: Write the Taskfile**
 
 Create `Taskfile.yml`:
 
@@ -173,7 +173,7 @@ tasks:
 
 `test:examples` is deliberately absent from `verify` until Task 13 creates the example module; Task 13 adds it.
 
-- [ ] **Step 4: Write the placeholder package**
+- [x] **Step 4: Write the placeholder package**
 
 Create `doc.go`:
 
@@ -190,7 +190,7 @@ Create `doc.go`:
 package relay
 ```
 
-- [ ] **Step 5: Write `.gitignore` and `README.md`**
+- [x] **Step 5: Write `.gitignore` and `README.md`**
 
 ```bash
 printf 'coverage.out\n.devbox/\n.task/\n' > .gitignore
@@ -198,18 +198,18 @@ printf 'coverage.out\n.devbox/\n.task/\n' > .gitignore
 
 `README.md` needs the module path, a one-paragraph description matching `doc.go`, and a note that `examples/` is a separate module. Keep it short; Task 16 expands it once the API is real.
 
-- [ ] **Step 6: Move the spec in**
+- [x] **Step 6: Move the spec in**
 
 ```bash
 mkdir -p docs
 cp ../minecraft-protocol/docs/superpowers/specs/2026-08-16-relay-proxy-framework-design.md docs/
 ```
 
-- [ ] **Step 7: Write the CI workflow**
+- [x] **Step 7: Write the CI workflow**
 
 Create `.github/workflows/ci.yml` running, on push and pull request: devbox install, then `devbox run -- task verify`. Model it on `../minecraft-protocol/.github/workflows/` if one exists; otherwise use `jetify-com/devbox-install-action@v0.13.0` followed by the single verify step.
 
-- [ ] **Step 8: Verify the gate works**
+- [x] **Step 8: Verify the gate works**
 
 Run: `devbox run -- task verify`
 Expected: PASS.
@@ -223,7 +223,7 @@ git checkout go.mod 2>/dev/null || sed -i '/example.com\/x/d;/^require /d' go.mo
 devbox run -- task deps:check   # expected: PASS
 ```
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add -A
@@ -240,7 +240,7 @@ git commit -m "chore: bootstrap the relay module and its toolchain"
 **Interfaces:**
 - Produces: `Direction` (`ToServer`, `ToClient`), `Action` (`Forward`, `Drop`, `Replace`), `Descriptor{ID int32; Name string}`, `Message` with `Raw []byte`, `Decoded any`, `Desc Descriptor`, methods `SetRaw([]byte)`, `SetDecoded(any)`, `DecodedChanged() bool`, `RawChanged() bool`. Sentinels `ErrInvalidConfig`, `ErrNoHealthyUpstream`, `ErrSessionClosed`, `ErrMessageTooLarge`, `ErrHook`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `message_test.go`:
 
@@ -303,12 +303,12 @@ func TestMessageResetClearsEverything(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `ToServer`, `Message`, and the rest.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `message.go`:
 
@@ -440,12 +440,12 @@ var (
 )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add message.go errors.go message_test.go
@@ -465,7 +465,7 @@ git commit -m "feat: add the message, action, and error vocabulary"
 
 `Framer.ReadMessage` takes a `Reader` interface rather than a `*bufio.Reader`. Read the "Mid-stream transforms" section of the spec for why before writing this task: the conduit in Task 4 has to be the outermost buffer, so it cannot hand out a `*bufio.Reader`, and retrofitting that signature after the harness and every test double were written against a concrete type is a lot of churn to avoid for free here.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `testframer_test.go` — the newline framer the whole core test suite uses. It lives in a `_test.go` file so the zero-dependency module never ships it:
 
@@ -524,12 +524,12 @@ func TestLineFramerRoundTrip(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS for this file alone (it defines everything it uses). This step exists to confirm the harness compiles before the interfaces below constrain it.
 
-- [ ] **Step 3: Write the interfaces**
+- [x] **Step 3: Write the interfaces**
 
 Create `framer.go`:
 
@@ -725,7 +725,7 @@ func (nopSink) RawChunk(context.Context, int64, Direction, []byte)      {}
 func (nopSink) CloseSession(context.Context, int64)                     {}
 ```
 
-- [ ] **Step 4: Write the conformance harness test first**
+- [x] **Step 4: Write the conformance harness test first**
 
 Create `relaytest/framer_test.go`:
 
@@ -791,12 +791,12 @@ func TestFramerContractRejectsAShortWrite(t *testing.T) {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it fails**
+- [x] **Step 5: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./relaytest`
 Expected: FAIL — no such package `relaytest`.
 
-- [ ] **Step 6: Write the harness**
+- [x] **Step 6: Write the harness**
 
 Create `relaytest/framer.go`:
 
@@ -975,12 +975,12 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 }
 ```
 
-- [ ] **Step 7: Run tests to verify they pass**
+- [x] **Step 7: Run tests to verify they pass**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS. Note that `TestFramerContractRejectsAShortWrite` relies on `FramerContract` reporting through `t.Fatalf` on the passed-in `*testing.T`; because `Fatalf` on a synthetic `*testing.T` does not unwind the calling goroutine the way it does in a real test, the harness must reach the write check before any `Fatalf`. It does — `roundTrip` writes first.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add framer.go hook.go sink.go testframer_test.go relaytest/
@@ -1002,7 +1002,7 @@ Read the "Mid-stream transforms" section of the spec before starting, and read `
 
 The one rule everything follows from: **buffer raw bytes, and transform them as they are handed out rather than as they are buffered.** Under that ordering a swap never has to reach into the buffer, rebuild a reader chain, or interrupt a parked pump. It is a field assignment under a mutex, safe from any goroutine.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `conduit_test.go`:
 
@@ -1235,12 +1235,12 @@ func TestConduitComposesSwaps(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `NewConduit`, `Transform`, `ErrSwapPending`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `conduit.go`:
 
@@ -1434,12 +1434,12 @@ ErrSwapPending = errors.New("relay: swap with bytes still buffered")
 
 Note the composition order. Read transforms compose outermost-last — bytes come off the wire and pass through the oldest transform first — while write transforms compose in the mirror order, so a message passes through the newest first on the way out. Getting this backwards produces a stream that works for one layer and breaks the moment a second is added, which is why the composition test uses two flips.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./... -count=5`
 Expected: PASS under `-race` on every run. The parked-swap test is the one that matters: it exists to catch a lock held around the socket read, and it only fails under `-race` or under load.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add conduit.go conduit_test.go errors.go
@@ -1459,7 +1459,7 @@ git commit -m "feat: add per-direction conduits and mid-stream transform swaps"
 
 `Config` names three types that belong to later tasks: `Upstream` and `Selector` (Task 10) and `*Session` (Task 6). Declare them here, empty, in the files that will own them — `Upstream` and the `Selector` interface in `selector.go`, and the `Session` struct with only the fields `Config` needs in `session.go`. Task 6 and Task 10 grow them rather than creating them. Do not put them in `config.go` and move them later; a type that lives in the wrong file for six tasks tends to stay there.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `config_test.go` covering: a config with no ports is `ErrInvalidConfig`; a port with no upstreams is `ErrInvalidConfig`; a nil `Framer` is `ErrInvalidConfig`; a duplicate port number is `ErrInvalidConfig`; and a minimal valid config gets every default filled in — `Prober` becomes a `DialProber`, `Sink` becomes `nopSink`, `Selector` becomes `FirstHealthy()`, and the numeric fields become their documented defaults. Assert with `errors.Is(err, ErrInvalidConfig)` rather than on message text.
 
@@ -1477,12 +1477,12 @@ Defaults to assert:
 | `DialTimeout` | 5s | |
 | `DrainGrace` | 5s | one in-flight write, not a lingering session |
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `Config`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `config.go`. `Config` holds:
 
@@ -1538,12 +1538,12 @@ const (
 
 `OnSessionError` defaults to a `slog` line at warn level on `Config.Logger`, itself defaulting to `slog.Default()`. `Run` returns only fatal faults, so this is where per-session errors go; with thousands of sessions there is nowhere else they can go.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add config.go config_test.go
@@ -1564,7 +1564,7 @@ git commit -m "feat: add proxy configuration, validation, and defaults"
 
 This is the largest task in the plan. Build it in the order the steps give, and keep every test on `net.Pipe` — no listener is involved until Task 11.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `session_test.go` covering, in this order:
 
@@ -1582,12 +1582,12 @@ Create `session_test.go` covering, in this order:
 
 Write a `recordingSink` and a `countingCodec` in this file. Both are test doubles; both stay in `_test.go`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `Session`.
 
-- [ ] **Step 3: Write the session type**
+- [x] **Step 3: Write the session type**
 
 Create `session.go`. The shape:
 
@@ -1632,7 +1632,7 @@ Key methods and the reasoning each one has to encode:
 - `Snapshot() SessionSnapshot` — a copy of the identity, addresses, open time, and metadata map. Copy the map; handing out the live one turns a listing into a data race.
 - `Close()` — idempotent through `closeOnce`, cancels the context with `ErrSessionClosed`.
 
-- [ ] **Step 4: Write the writer lock**
+- [x] **Step 4: Write the writer lock**
 
 ```go
 // write sends one framed message to a peer.
@@ -1658,7 +1658,7 @@ func (s *Session) write(dir Direction, raw []byte) error {
 }
 ```
 
-- [ ] **Step 5: Write the read pump**
+- [x] **Step 5: Write the read pump**
 
 One function serving both directions, parameterised by direction. It:
 
@@ -1675,7 +1675,7 @@ One function serving both directions, parameterised by direction. It:
 
 A read pump blocks while writing to a slow peer. That is deliberate: it propagates TCP backpressure to the origin instead of buffering, and a queue between the pumps would cost a goroutine per direction to decouple something nobody asked to decouple.
 
-- [ ] **Step 6: Write the hook chain with panic recovery**
+- [x] **Step 6: Write the hook chain with panic recovery**
 
 ```go
 // runHooks walks the chain and returns the action the chain settled on.
@@ -1724,15 +1724,15 @@ func (s *Session) callHook(ctx context.Context, h Hook, m *Message) (action Acti
 
 A hook that returns an error ends its session. A hook that meant to rewrite a message and failed has left the stream in a state neither peer agreed to, and forwarding anyway corrupts it quietly.
 
-- [ ] **Step 7: Write the message pool**
+- [x] **Step 7: Write the message pool**
 
 A package-level `sync.Pool` of `*Message`. Take on read, `reset()` and put back after the write. `Message.Raw` is borrowed for the duration of a hook call and no longer — the same ownership contract `minecraft-protocol/middleware` documents, so the two repositories read consistently.
 
-- [ ] **Step 8: Write the run and shutdown paths**
+- [x] **Step 8: Write the run and shutdown paths**
 
 `(*Session).run` starts both pumps, waits for the first to fail, cancels the context, gives the peers `Config.DrainGrace` to finish an in-flight write, then closes both connections, calls `Sink.CloseSession` exactly once, and returns. Non-EOF causes go to `Config.OnSessionError`.
 
-- [ ] **Step 9: Add `Session.Swap`**
+- [x] **Step 9: Add `Session.Swap`**
 
 ```go
 // Swap installs a mid-stream transform on one direction's conduit.
@@ -1754,12 +1754,12 @@ func (s *Session) Swap(dir Direction, t Transform) error {
 
 Add a session test for the cross-direction case: a hook on the `ToServer` pump swaps `ToClient` while that pump is parked in a read, and the next message from the upstream arrives transformed. This is the arrangement every real consumer will use, and it is only safe because of the hand-out ordering in Task 4.
 
-- [ ] **Step 10: Run tests to verify they pass**
+- [x] **Step 10: Run tests to verify they pass**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS, under `-race`. The writer lock is one of the two places in this module where a race costs data, so a clean race run is the acceptance criterion, not a bonus.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add session.go session_test.go
@@ -1780,7 +1780,7 @@ git commit -m "feat: add session relaying, hook chains, and per-session panic re
 
 Injection is designed in rather than added later because the guarantee it makes — an injected message never lands inside a relayed one — depends on every write going through the same lock. That is already true after Task 6; this task exposes it and proves it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `inject_test.go` with a framer built for this test and nothing else:
 
@@ -1816,12 +1816,12 @@ The test: run a session over `net.Pipe`, relay a stream of `AAAA…`-style messa
 
 Also assert that `Inject` on a closed session returns `ErrSessionClosed` rather than blocking forever.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `Inject`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```go
 // Inject sends a message to one peer as though the other had sent it.
@@ -1851,12 +1851,12 @@ func (s *Session) InjectDecoded(dir Direction, value any) error
 
 Record injected messages to the sink as well, with the direction they travelled. A capture that omits what the proxy itself sent is a capture that cannot be replayed.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./... -count=5`
 Expected: PASS on every run. Repeat the run a few times; an ordering test that passes once has proved less than it looks.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add session.go inject_test.go
@@ -1875,27 +1875,27 @@ git commit -m "feat: add message injection with a stated ordering guarantee"
 - Consumes: `Session`, `SessionSnapshot` from Task 6.
 - Produces: an unexported `registry` and the `Proxy` methods Task 11 exposes over it: `Sessions() []SessionSnapshot`, `SessionCount() int`, `UpstreamCount(addr string) int`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `registry_test.go`: adding and removing sessions moves the counts; `snapshots()` returns a stable slice that later mutation of the registry does not change; per-upstream counts track add and remove and never go negative; `drain(ctx)` closes every live session and returns when the last one is gone, or when the context expires. Add a test that hammers add, remove, and snapshot from several goroutines — the registry is read by `LeastConn` on the accept path, so it is contended by design.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `registry`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 A `sync.RWMutex` over `map[int64]*Session` plus `map[string]int` for per-upstream counts. The per-upstream map exists so `LeastConn` is a map lookup rather than a walk of every live session on every accept.
 
 `drain(ctx)` calls `Close` on every session and waits on a `sync.WaitGroup` that `run` decrements, honouring `ctx`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add registry.go registry_test.go
@@ -1915,7 +1915,7 @@ git commit -m "feat: track live sessions and per-upstream counts"
 
 Health is resolved lazily, when a client connects, rather than on a timer. A startup probe that goes stale is a real bug; a per-connection probe is only viable because of the three properties this task implements.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `health_test.go`. Drive time with a fake clock assigned to `Config.now` — never `time.Sleep`. Cover:
 
@@ -1926,12 +1926,12 @@ Create `health_test.go`. Drive time with a fake clock assigned to `Config.now` �
 5. **Dial failure writes through.** `markDown(addr)` makes a subsequent `check` report that address unhealthy without probing, until the TTL expires.
 6. **Ordering is preserved.** `check` returns the healthy addresses in the order they were given, because `FirstHealthy` depends on it.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `healthCache`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```go
 // healthCache answers "is this upstream usable" without probing on every
@@ -1963,12 +1963,12 @@ type healthEntry struct {
 
 Do not hold `mu` across a `Probe` call. That is the mistake this structure exists to avoid: probing under the lock serialises the fan-out and turns one slow upstream into a stall on every accept.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./... -count=5`
 Expected: PASS under `-race` on every run. The single-flight path is the second of the two places in this module where a race costs data.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add health.go health_test.go
@@ -1987,7 +1987,7 @@ git commit -m "feat: resolve upstream health lazily through a single-flight prob
 - Consumes: `registry` from Task 8.
 - Produces: `Upstream`, `Selector`, and `FirstHealthy()`, `RoundRobin()`, `LeastConn()`, `StickyByClientIP()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `selector_test.go`:
 
@@ -1998,12 +1998,12 @@ Create `selector_test.go`:
 5. Every selector returns `ErrNoHealthyUpstream` for an empty candidate list.
 6. `StickyByClientIP` on a `net.Conn` whose address does not parse falls back rather than panicking.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `Selector`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```go
 // Upstream is one server a port may route to.
@@ -2028,12 +2028,12 @@ type Selector interface {
 
 Dial failover applies underneath whichever selector is configured: Task 11 marks a dial error down in the health cache and asks the selector again with the remaining candidates.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add selector.go selector_test.go
@@ -2051,7 +2051,7 @@ git commit -m "feat: add upstream selectors"
 - Consumes: every earlier task.
 - Produces: `New(Config) (*Proxy, error)`, `(*Proxy).Run(ctx) error`, `(*Proxy).Shutdown(ctx) error`, `(*Proxy).Sessions()`, `(*Proxy).SessionCount()`, and `(*Proxy).Addrs() map[int]net.Addr`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `relay_test.go` against loopback TCP, not `net.Pipe` — this is the task where accept, bind, and shutdown are the subject. Cover:
 
@@ -2067,12 +2067,12 @@ Create `relay_test.go` against loopback TCP, not `net.Pipe` — this is the task
 10. **Graceful shutdown.** `Shutdown` stops the listeners first, then gives live sessions `DrainGrace`; a session mid-relay finishes its in-flight write; `Run` returns nil.
 11. **`Run` returns a fatal bind error.** Two proxies on the same fixed port: the second returns an error from `Run` rather than logging and continuing.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./...`
 Expected: FAIL — undefined `New`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `New` validates the config and builds the health cache, registry, and selector. Every configuration fault is reported here.
 
@@ -2089,17 +2089,17 @@ The accept path, in order:
 
 `Run` returns only fatal faults — invalid configuration, a listener that cannot bind. Everything per-session goes to `OnSessionError`; with thousands of sessions there is nowhere else it can go.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./... -count=3`
 Expected: PASS. Watch for a leaked listener between runs; a test that binds port 0 and never closes will pass alone and fail in a suite.
 
-- [ ] **Step 5: Check the gate still holds**
+- [x] **Step 5: Check the gate still holds**
 
 Run: `devbox run -- task verify`
 Expected: PASS, including `deps:check`. The core is now feature-complete and its require block is still empty.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add relay.go relay_test.go
@@ -2119,16 +2119,16 @@ git commit -m "feat: add the proxy, listeners, and lazy upstream resolution"
 
 The core is deliberately not generic: `Message.Decoded` is `any` next to a `Descriptor`, so `Proxy`, `Session`, and `Hook` carry no type parameter and a bytes-only consumer writes no ceremony. This package is the other half of that trade — typed use should not cost hand-written assertions either.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `typed/typed_test.go`: a `typed.On[myPacket]` hook fires only for messages whose `Decoded` is a `myPacket`, is skipped for other types and for undecoded messages, and a mutation it makes through `SetDecoded` is visible to the core as a decoded change. Assert that a non-matching message passes through as `Forward` rather than being dropped — a typed hook filters, it does not gate.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test -- ./typed`
 Expected: FAIL — no such package.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```go
 // Package typed removes the type assertion from a hook that only cares about
@@ -2145,12 +2145,12 @@ package typed
 func On[P any](fn func(context.Context, *relay.Session, P, *relay.Message) (relay.Action, error)) relay.Hook
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `devbox run -- task test -- ./...`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add typed/
@@ -2172,7 +2172,7 @@ git commit -m "feat: add generic hook wrappers over the untyped core"
 
 This example depends on nothing outside the standard library — `crypto/aes` and `crypto/cipher` are all it needs. It lives in the examples module anyway, because the core's `go.mod` stays empty and `examples/` is where anything runnable belongs.
 
-- [ ] **Step 1: Create the example module**
+- [x] **Step 1: Create the example module**
 
 ```bash
 cd examples
@@ -2183,7 +2183,7 @@ Add a `replace github.com/go-theft-craft/relay => ../` line. The replace belongs
 
 Then add `test:examples` to the `verify` task in the root `Taskfile.yml`, which Task 1 deliberately left out until this module existed.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `examples/cipher/proxy_test.go`. The protocol under test is deliberately trivial — newline-delimited lines, with one message, `START-CIPHER`, as the negotiation trigger — so that everything the test proves is about the swap and nothing is about parsing.
 
@@ -2196,12 +2196,12 @@ Assert, in this order:
 5. **A long session stays synchronised.** Several hundred messages after the boundary, in both directions, all arriving intact. A keystream that restarts, or a swap applied one message early, corrupts everything downstream of it rather than one message — so a single-message assertion would miss it.
 6. **Swapping with bytes buffered is refused.** Send the trigger and a following message in one write, and assert the hook's `Swap` returns `ErrSwapPending` rather than silently corrupting the stream.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `devbox run -- task test:examples`
 Expected: FAIL — no package `cipher`.
 
-- [ ] **Step 4: Write the example**
+- [x] **Step 4: Write the example**
 
 Create `examples/cipher/proxy.go`.
 
@@ -2241,12 +2241,12 @@ Two things to get right, both of which the test checks:
 
 `Transform.Read` transforms in place, which suits `cipher.Stream.XORKeyStream` exactly — it accepts the same slice as source and destination. `Transform.Write` returns a new slice, so allocate there rather than XORing the caller's buffer; the caller still owns it and a hook or sink may hold a view.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `devbox run -- task test:examples -- -count=5`
 Expected: PASS on every run. Run it repeatedly: a swap that races the opposite pump fails intermittently, which is exactly the failure this example exists to prove cannot happen.
 
-- [ ] **Step 6: Prove the test can fail**
+- [x] **Step 6: Prove the test can fail**
 
 Break the example on purpose and confirm each break is caught:
 
@@ -2256,12 +2256,12 @@ Break the example on purpose and confirm each break is caught:
 
 Restore afterwards. A test that has never failed has proved nothing, and this one is standing in for the coverage the Minecraft example cannot provide.
 
-- [ ] **Step 7: Check the core gate still holds**
+- [x] **Step 7: Check the core gate still holds**
 
 Run: `devbox run -- task verify`
 Expected: PASS. The core's require block is still empty, and now `test:examples` runs inside `verify`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add examples/ Taskfile.yml
@@ -2294,7 +2294,7 @@ The API this task builds on, confirmed against the current tree:
 | packet | `protocol.Packet{State, Direction, ID int32, Name string, Value any, Payload []byte}` |
 | status ping | `protocol.NewStream(Session, Transport, ...StreamOption)`, `(*Stream).Start/Read/Write`, `protocols.Handshake(Protocol, host, port, nextState) (Packet, error)`, `protocols.StatusResponse` |
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 Task 13 created `examples/go.mod` and wired `test:examples` into `verify`. This task only adds what the Minecraft example needs:
 
@@ -2305,18 +2305,18 @@ go get github.com/go-theft-craft/minecraft-protocol@latest
 
 This is the first non-stdlib dependency in the repository. It belongs to the examples module; run `devbox run -- task deps:check` immediately afterwards to confirm the core is untouched.
 
-- [ ] **Step 2: Write the failing framer test**
+- [x] **Step 2: Write the failing framer test**
 
 Create `examples/minecraft/framer_test.go` calling `relaytest.FramerContract` with the real framer and a table of real payloads: a single byte, a packet with a multi-byte varint length, one that crosses the read buffer size, and one at the configured limit. Add a case asserting a payload one byte over the limit is a read error rather than a truncated message.
 
 This is the conformance harness earning its place. It was written in Task 3 against a newline framer; this is the first time it meets a length-prefixed one.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `devbox run -- task test:examples`
 Expected: FAIL — no package `minecraft`.
 
-- [ ] **Step 4: Write the framer**
+- [x] **Step 4: Write the framer**
 
 Create `examples/minecraft/framer.go`. A thin adapter, and the doc comment should say so — the interesting content is `wire/java`, not this file.
 
@@ -2343,11 +2343,11 @@ Two things to get right, both of which the harness checks:
 
 `WriteMessage` is `BuildFrame` then `WriteFrame`. Do not write the payload directly; the length prefix is not the framer's to guess.
 
-- [ ] **Step 5: Write the failing codec test**
+- [x] **Step 5: Write the failing codec test**
 
 Create `examples/minecraft/codec_test.go`: a handshake packet round-trips through `Decode` and `Encode` and comes back byte-identical; `Decode` returns a descriptor whose `ID` and `Name` are non-zero; a handshake with `nextState=1` moves the *serverbound* decoder into the status state and leaves the clientbound one alone; a body that decodes to nothing returns an error rather than a nil packet.
 
-- [ ] **Step 6: Write the codec**
+- [x] **Step 6: Write the codec**
 
 Create `examples/minecraft/codec.go`. The design problem here is the one the file table calls "per-direction state", and it is worth stating plainly in the doc comment:
 
@@ -2378,7 +2378,7 @@ State transitions: watch for the handshake packet on the serverbound side and ca
 
 **Stop decoding at encryption.** Once a session enables encryption, decode nothing and return an error so the relay falls back to opaque passthrough. Standing between an encrypted login as a third party means running two key exchanges and holding the client's session credentials, which is a project in itself and teaches nothing about the framework seam. Say that in the comment; a reader will otherwise assume it was an oversight.
 
-- [ ] **Step 7: Write the prober**
+- [x] **Step 7: Write the prober**
 
 Create `examples/minecraft/prober.go`.
 
@@ -2401,17 +2401,17 @@ Dial with the context, build a client session and a `protocol.Stream` over a `pr
 
 The whole probe must respect `ctx`, because it runs on the accept path — a probe that ignores its deadline turns one wedged upstream into a stall on every connection.
 
-- [ ] **Step 8: Run tests to verify they pass**
+- [x] **Step 8: Run tests to verify they pass**
 
 Run: `devbox run -- task test:examples`
 Expected: PASS.
 
-- [ ] **Step 9: Check the core gate still holds**
+- [x] **Step 9: Check the core gate still holds**
 
 Run: `devbox run -- task verify`
 Expected: PASS. The example module now depends on `minecraft-protocol`, and the core's require block must still be empty. This is the check the whole two-module split exists to make, so run it here rather than at the end.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add examples/ Taskfile.yml
@@ -2431,7 +2431,7 @@ git commit -m "feat(examples): implement the framer, codec, and prober seams"
 
 The sink is a package rather than a file because several hundred lines of SQL and batching in the same package as the framer would bury what a reader came for.
 
-- [ ] **Step 1: Write the failing sink test**
+- [x] **Step 1: Write the failing sink test**
 
 Create `examples/minecraft/store/sqlite_test.go` against a `t.TempDir()` database:
 
@@ -2442,12 +2442,12 @@ Create `examples/minecraft/store/sqlite_test.go` against a `t.TempDir()` databas
 5. `CloseSession` followed by `Close` flushes everything — no row is lost to a batch that never filled.
 6. Two concurrent sessions interleave without their rows crossing.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `devbox run -- task test:examples`
 Expected: FAIL — no package `store`.
 
-- [ ] **Step 3: Write the sink**
+- [x] **Step 3: Write the sink**
 
 Create `examples/minecraft/store/sqlite.go` over `modernc.org/sqlite`, which is chosen because it is pure Go — the example must build without cgo, or it stops being something a reader can run.
 
@@ -2478,7 +2478,7 @@ Set `PRAGMA journal_mode=WAL` and `PRAGMA synchronous=NORMAL`. A capture sink th
 
 `Dropped()` is exported because a silent drop count is not an observability story. The `main` in the next step reports it on shutdown.
 
-- [ ] **Step 4: Write the runnable proxy**
+- [x] **Step 4: Write the runnable proxy**
 
 Create `examples/minecraft/main.go`: flags for listen ports, upstream addresses, protocol version, database path, and log level; wire the framer, codec, prober, and sink into a `relay.Config`; install one demonstration hook; run until SIGINT and shut down gracefully, reporting session count and dropped records.
 
@@ -2488,7 +2488,7 @@ The demonstration hook should show `SetDecoded` causing a re-encode, and log the
 
 Do not demonstrate `Session.Swap` here. This example stops decoding at encryption, so any swap it could show would be an identity function standing in for a cipher it does not implement, and a stub on the example's front page teaches the wrong shape. `Transform` has its own example in `examples/cipher` (Task 13); point at it from a comment here instead, at the place encryption is detected.
 
-- [ ] **Step 5: Run it**
+- [x] **Step 5: Run it**
 
 ```bash
 devbox run -- task build
@@ -2496,7 +2496,7 @@ devbox run -- task build
 
 Then run the binary against a real server if one is available, and confirm rows land. If no server is available, say so and rely on Task 16's end-to-end test — do not report this step as verified when it was skipped.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add examples/
@@ -2514,7 +2514,7 @@ git commit -m "feat(examples): add the batched SQLite sink and a runnable proxy"
 - Consumes: everything.
 - Produces: the test that proves the seam holds against a real protocol, and a repository someone else can pick up.
 
-- [ ] **Step 1: Write the end-to-end test**
+- [x] **Step 1: Write the end-to-end test**
 
 Create `examples/minecraft/proxy_test.go`. A stub upstream on loopback speaks just enough of the protocol to answer a handshake and a status request; the proxy sits in front of it with the framer, codec, prober, and the SQLite sink all wired; a client connects through the proxy and completes a status exchange. Assert:
 
@@ -2526,18 +2526,18 @@ Create `examples/minecraft/proxy_test.go`. A stub upstream on loopback speaks ju
 
 Use `t.TempDir()` for the database and port 0 for every listener.
 
-- [ ] **Step 2: Run the example tests**
+- [x] **Step 2: Run the example tests**
 
 Run: `devbox run -- task test:examples`
 Expected: PASS.
 
-- [ ] **Step 3: Check the conformance harness has teeth**
+- [x] **Step 3: Check the conformance harness has teeth**
 
 Task 14 ran `relaytest.FramerContract` against the real framer and it passed. A harness that passes is not yet evidence it can fail, so break the framer on purpose — drop the length check, or return `Frame.Payload()` without copying — and confirm the harness catches each one. Restore the framer afterwards.
 
 If either mutation passes, the harness is too weak and this is the moment to strengthen it, while the only consumer is one we control.
 
-- [ ] **Step 4: Write the README**
+- [x] **Step 4: Write the README**
 
 Rewrite `README.md` around what a reader needs in order:
 
@@ -2550,7 +2550,7 @@ Rewrite `README.md` around what a reader needs in order:
 
 No badges, no roadmap, no feature table.
 
-- [ ] **Step 5: Reconcile the spec with what was built**
+- [x] **Step 5: Reconcile the spec with what was built**
 
 Read `docs/2026-08-16-relay-proxy-framework-design.md` against the code and fix every place they disagree. The spec is now a record of a design that exists, not a proposal, so update its status line and resolve its open questions with what the example actually showed:
 
@@ -2562,11 +2562,11 @@ Confirm the spec's account of `Transform` matches what got built. Two claims in 
 - **Compression is not a `Transform`.** It compresses each packet independently inside the frame envelope, so nothing carries between frames and it belongs to the `Framer`. Only a stream cipher, whose keystream is continuous, needs the conduit. If the spec anywhere groups the two, fix it.
 - **`Transform`'s worked consumer is `examples/cipher`, not the Minecraft example.** Say why in one sentence, so the next reader does not decide the Minecraft example is missing something and add a stub to it.
 
-- [ ] **Step 6: Cross-reference the panic divergence**
+- [x] **Step 6: Cross-reference the panic divergence**
 
 The spec commits to documenting the panic-recovery divergence in both repositories. `relay` recovers hook panics at the session boundary; `minecraft-protocol/router` deliberately does not recover handler panics. Add a sentence to `relay`'s `callHook` doc comment naming the divergence and its reason, and open a note for the corresponding sentence in `router` — that edit belongs to `minecraft-protocol` and is out of scope here, so record it rather than making it.
 
-- [ ] **Step 7: Write the changelog and tag**
+- [x] **Step 7: Write the changelog and tag**
 
 Create `CHANGELOG.md` with a `0.1.0` entry describing the initial API. Then:
 
@@ -2583,7 +2583,7 @@ git tag v0.1.0
 
 Do not push the tag until the repository has a remote and the module path resolves. Publishing to a public Go module path is not reversible — the proxy and the checksum database keep serving whatever is tagged, and rewriting history on GitHub does not recall it.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -A
