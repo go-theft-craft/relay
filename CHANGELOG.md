@@ -5,7 +5,10 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
-## Unreleased
+## [0.2.0] — 2026-08-16
+
+Additive: nothing in `v0.1.0` changed behaviour, and the minor bump is because
+`Config` grew a field rather than because anything broke.
 
 ### Added
 
