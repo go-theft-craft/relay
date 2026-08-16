@@ -42,7 +42,10 @@ tasks:
   test:
     desc: Run unit tests with the race detector
     cmds:
-      - go test -race -covermode=atomic -coverprofile=coverage.out {{.CLI_ARGS | default "./..."}}
+      # A short timeout on purpose: this suite is all pipes and loopback, so a
+      # run that reaches two minutes has deadlocked and the stack dump is the
+      # thing worth waiting for, not the default ten minutes of nothing.
+      - go test -race -timeout 120s -covermode=atomic -coverprofile=coverage.out {{.CLI_ARGS | default "./..."}}
 
   test:examples:
     desc: Run the example module's tests

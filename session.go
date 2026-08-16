@@ -207,6 +207,63 @@ func (s *Session) write(dir Direction, raw []byte) error {
 	return s.cfg.Framer.WriteMessage(s.conduit(dir), raw)
 }
 
+// Inject sends a message to one peer as though the other had sent it.
+//
+// It acquires the same writer lock relaying uses, so an injected message never
+// interleaves inside a relayed one — the guarantee that makes injection worth
+// having, and the one a framework handing out a raw net.Conn cannot make.
+//
+// Injected messages do not run the hook chain. A hook that wants to see what it
+// injected can see it at the point it injected it, and re-entering the chain
+// invites a hook that injects on every message to recurse.
+//
+// They are recorded to the Sink, because a capture that omits what the proxy
+// itself sent is a capture that cannot be replayed.
+func (s *Session) Inject(dir Direction, raw []byte) error {
+	select {
+	case <-s.ctx.Done():
+		return ErrSessionClosed
+	default:
+	}
+
+	if err := s.write(dir, raw); err != nil {
+		return err
+	}
+
+	s.cfg.Sink.Message(s.ctx, s.sinkID, MessageRecord{Dir: dir, Raw: raw, At: time.Now()})
+
+	return nil
+}
+
+// InjectDecoded encodes through the configured Codec and injects the result.
+//
+// It returns ErrInvalidConfig when no codec is configured, because the
+// alternative is a silent no-op on a call that read like it sent something.
+func (s *Session) InjectDecoded(dir Direction, value any) error {
+	if s.cfg.Codec == nil {
+		return fmt.Errorf("%w: InjectDecoded needs a Codec", ErrInvalidConfig)
+	}
+
+	raw, err := s.cfg.Codec.Encode(value)
+	if err != nil {
+		return fmt.Errorf("relay: encode injected message: %w", err)
+	}
+
+	select {
+	case <-s.ctx.Done():
+		return ErrSessionClosed
+	default:
+	}
+
+	if err := s.write(dir, raw); err != nil {
+		return err
+	}
+
+	s.cfg.Sink.Message(s.ctx, s.sinkID, MessageRecord{Dir: dir, Raw: raw, Decoded: value, At: time.Now()})
+
+	return nil
+}
+
 // run drives the session until either direction fails, then shuts it down.
 func (s *Session) run() {
 	defer s.finish()
