@@ -144,10 +144,18 @@ func (c *Conduit) Buffered() int {
 // Swap installs a transform over whatever is already active, so a session that
 // layers a second encoding over a first ends up with both, in that order.
 //
-// It refuses when the read buffer still holds unread bytes: those arrived
-// before the switch and belong to the old encoding, and transforming them on
-// the way out would corrupt the very next message with nothing to point at
-// afterwards. Failing here names the cause at the cause.
+// It refuses when the read buffer still holds unread bytes *and* the swap
+// changes the read side: those bytes arrived before the switch and belong to
+// the old encoding, so transforming them on the way out would corrupt the very
+// next message with nothing to point at afterwards. Failing here names the
+// cause at the cause.
+//
+// A write-only swap is not refused, because buffered read bytes have nothing to
+// do with it. That distinction is what lets a caller arm the two halves at
+// different moments, which a proxy standing between two peers needs: the read
+// side has to be armed before the peer is told to switch, since the peer may
+// answer in the new encoding immediately, while the write side must stay in the
+// old encoding until the message that tells it has actually gone out.
 //
 // In practice the buffer is empty exactly when it should be. Every protocol
 // that renegotiates mid-stream requires the peer to stop sending across the
@@ -162,7 +170,7 @@ func (c *Conduit) Swap(t Transform) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.pending > 0 {
+	if t.Read != nil && c.pending > 0 {
 		return fmt.Errorf("%w: %d unread bytes", ErrSwapPending, c.pending)
 	}
 

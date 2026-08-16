@@ -5,6 +5,20 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+## Unreleased
+
+### Fixed
+
+- `Conduit.Swap` refused any swap while unread bytes were buffered. It now
+  refuses only swaps that change the read side, because buffered read bytes have
+  nothing to do with a write-only swap.
+
+  This is what makes the ordering a proxy actually needs expressible: arm the
+  read side before forwarding the message that moves the boundary — the peer may
+  answer in the new encoding immediately — and the write side after it has gone
+  out. An endpoint never faces this, because it switches both halves of its own
+  stream at once. `examples/cipher` had the race and CI caught it.
+
 ## [0.2.0] — 2026-08-16
 
 Additive: nothing in `v0.1.0` changed behaviour, and the minor bump is because

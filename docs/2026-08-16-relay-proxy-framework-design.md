@@ -526,6 +526,30 @@ halves of one link, and a proxy stands on two links, so a negotiated cipher
 needs two swaps with two independent keystreams. `examples/cipher` is the worked
 form.
 
+## As built: the swap-ordering correction
+
+Found by CI, not by the local suite, which is the point of having it. The cipher
+example forwarded the trigger and *then* swapped the upstream link. That is a
+race a proxy loses: the instant the upstream sees the trigger it may answer in
+the new encoding, and if its reply lands before the swap does, the bytes are
+sitting unread in the buffer and the swap is refused with `ErrSwapPending`.
+Under contention it failed roughly one run in eight.
+
+The fix is an ordering an endpoint never has to think about, because an endpoint
+switches both halves of its own stream at once. A proxy cannot:
+
+1. Arm the upstream **read** side, before the peer is told anything.
+2. Send the trigger, which must still leave in the old encoding.
+3. Arm the upstream **write** side.
+
+Making that expressible needed one change to the core. `Conduit.Swap` refused
+any swap while unread bytes were buffered; it now refuses only swaps that
+change the read side. Buffered read bytes have nothing to do with a write-only
+swap, and refusing one made the three-step ordering above impossible to write.
+
+The lesson generalises past this example: **a proxy arms its read side before
+it forwards the message that moves the boundary, and its write side after.**
+
 ## As built: notes on the testing plan
 
 **`relaytest.FramerContract` was strengthened.** As specified, `bufferIsOwned`

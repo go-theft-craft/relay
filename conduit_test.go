@@ -275,3 +275,70 @@ func TestConduitReadPropagatesEOF(t *testing.T) {
 		t.Fatalf("ReadByte after a clean close returned %v, want io.EOF", err)
 	}
 }
+
+// TestConduitWriteOnlySwapIgnoresBufferedBytes is what lets a caller arm the
+// two halves of a transform at different moments.
+//
+// A proxy needs that: the read side has to be armed before the peer is told to
+// switch, because the peer may answer in the new encoding immediately, while
+// the write side must stay in the old encoding until the message that tells it
+// has actually gone out. Refusing a write-only swap for bytes sitting in the
+// read buffer would make that ordering impossible to express.
+func TestConduitWriteOnlySwapIgnoresBufferedBytes(t *testing.T) {
+	client, server := pipePair(t)
+
+	c := NewConduit(server, 4096)
+	f := lineFramer{}
+
+	go func() { _, _ = client.Write([]byte("first\nleftover\n")) }()
+
+	if _, err := f.ReadMessage(c); err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if c.Buffered() == 0 {
+		t.Fatal("the test needs bytes left buffered; there were none")
+	}
+
+	if err := c.Swap(Transform{Write: flipped}); err != nil {
+		t.Fatalf("a write-only swap with %d bytes buffered: %v", c.Buffered(), err)
+	}
+
+	// The read side is untouched, so the buffered message still reads plainly.
+	got, err := f.ReadMessage(c)
+	if err != nil {
+		t.Fatalf("ReadMessage after a write-only swap: %v", err)
+	}
+	if string(got) != "leftover" {
+		t.Fatalf("buffered message = %q, want leftover", got)
+	}
+
+	// And the write side did change.
+	go func() { _ = f.WriteMessage(c, []byte("out")) }()
+
+	wire := make([]byte, 4)
+	if _, err := io.ReadFull(client, wire); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if !bytes.Equal(wire, flipped([]byte("out\n"))) {
+		t.Fatalf("wrote %q, want the flipped form", wire)
+	}
+}
+
+// TestConduitReadSwapStillRefusesBufferedBytes keeps the original refusal in
+// place: it is the read side the buffered bytes would corrupt.
+func TestConduitReadSwapStillRefusesBufferedBytes(t *testing.T) {
+	client, server := pipePair(t)
+
+	c := NewConduit(server, 4096)
+	f := lineFramer{}
+
+	go func() { _, _ = client.Write([]byte("first\nleftover\n")) }()
+
+	if _, err := f.ReadMessage(c); err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+
+	if err := c.Swap(Transform{Read: flip, Write: flipped}); !errors.Is(err, ErrSwapPending) {
+		t.Fatalf("a read swap with bytes buffered = %v, want ErrSwapPending", err)
+	}
+}
