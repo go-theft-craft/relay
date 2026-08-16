@@ -84,26 +84,41 @@ type Session struct {
 	onFinish func()
 }
 
-// newSession joins two connections. The caller has already dialled the upstream
-// and opened the sink record.
+// newSession joins two connections. The caller has already opened the sink
+// record.
+//
+// The upstream may be nil, because a PreFrame hook runs — and may answer the
+// connection outright — before there is any reason to have dialled one. The
+// caller attaches it with joinUpstream before running the session.
 func newSession(parent context.Context, cfg *Config, client, upstream net.Conn, info SessionInfo, sinkID int64) *Session {
 	ctx, cancel := context.WithCancelCause(parent)
 
-	return &Session{
+	s := &Session{
 		ID:            sessionIDs.Add(1),
 		Client:        client,
-		Upstream:      upstream,
 		Info:          info,
 		cfg:           cfg,
 		sinkID:        sinkID,
 		clientSide:    NewConduit(client, cfg.ReadBufferSize),
-		upstreamSide:  NewConduit(upstream, cfg.ReadBufferSize),
 		clientWrite:   make(chan struct{}, 1),
 		upstreamWrite: make(chan struct{}, 1),
 		ctx:           ctx,
 		cancel:        cancel,
 		meta:          make(map[string]any),
 	}
+
+	if upstream != nil {
+		s.joinUpstream(upstream, info.UpstreamAddr)
+	}
+
+	return s
+}
+
+// joinUpstream attaches the dialled upstream. It must be called before run.
+func (s *Session) joinUpstream(upstream net.Conn, addr string) {
+	s.Upstream = upstream
+	s.Info.UpstreamAddr = addr
+	s.upstreamSide = NewConduit(upstream, s.cfg.ReadBufferSize)
 }
 
 // Context returns the session context. It is cancelled when the session closes,
