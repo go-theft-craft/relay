@@ -117,11 +117,33 @@ func (c *Codec) Encode(value any) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// A packet is re-encoded by the session that decoded it, which is the one
-	// holding the state its identity was resolved against.
-	session := c.toServer
+	// Encoding uses the *other* session from the one that decoded, which is the
+	// least obvious thing in this file.
+	//
+	// A session's role fixes both directions: the serverbound decoder was built
+	// with RoleServer, so its inbound is serverbound and its outbound is
+	// clientbound. Re-encoding a serverbound packet therefore needs the session
+	// whose outbound is serverbound — the RoleClient one. That is not a
+	// workaround, it is what a proxy is: it reads serverbound traffic as the
+	// server the client dialled, and writes it as a client of the upstream.
+	session := c.toClient
 	if packet.Direction == protocol.DirectionClientbound {
-		session = c.toClient
+		session = c.toServer
+	}
+
+	// Encode against the state the packet was decoded in, not the state the
+	// session has reached since.
+	//
+	// This matters because the relay re-encodes after the whole hook chain,
+	// which is necessarily after Decode advanced the state machine. A handshake
+	// decodes in the handshaking state and moves both sessions to status or
+	// login on the way out, so by the time a hook that edited it returns, the
+	// session would refuse the very packet it just produced. Every packet
+	// carries the state it belongs to, so the fix is to honour it.
+	restore := session.State()
+	if packet.State != restore {
+		session.SetState(packet.State)
+		defer session.SetState(restore)
 	}
 
 	raw, err := session.EncodeFrame(packet)

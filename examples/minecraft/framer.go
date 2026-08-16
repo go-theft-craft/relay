@@ -50,6 +50,14 @@ func NewFramer(limits protocol.Limits) (*Framer, error) {
 // frame's own buffer, and relay.Framer promises the caller a slice the framer
 // will not reuse.
 //
+// Removing the copy does not currently fail any test, and that is worth saying
+// rather than leaving for someone to rediscover: the underlying ReadFrame
+// allocates a fresh buffer per frame, so two live payloads never alias and no
+// black-box test can tell a copy from a view into new memory. The copy is here
+// for the documented contract — Payload is borrowed and must not be retained —
+// not for an observed bug, and it stops being free the day that allocation
+// becomes a pool.
+//
 // The error is returned unwrapped so io.EOF survives: the relay reads a clean
 // peer close as io.EOF and anything else as a fault, and the underlying framer
 // already draws that line in the right place — an EOF before the first byte of
