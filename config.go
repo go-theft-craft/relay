@@ -16,6 +16,7 @@ const (
 	defaultProbeTimeout   = 2 * time.Second
 	defaultDialTimeout    = 5 * time.Second
 	defaultDrainGrace     = 5 * time.Second
+	defaultSinkQueueDepth = 1024
 )
 
 // OverflowPolicy is what an accept does when MaxSessions is already reached.
@@ -28,6 +29,44 @@ const (
 	// OverflowWait holds the connection until a slot frees or the proxy stops.
 	OverflowWait
 )
+
+// SinkOverflowPolicy is what a session does when its sink cannot keep up.
+//
+// It is a choice rather than a default because this tree already contains both
+// right answers: a telemetry store wants the record dropped and counted, and a
+// capture wants the session ended, since a recording missing a frame in the
+// middle is not evidence and still looks like a file.
+type SinkOverflowPolicy uint8
+
+const (
+	// SinkOverflowBlock calls the sink inline on the read pump, which is what
+	// the core has always done. Nothing is queued and nothing is copied, so a
+	// sink that breaks the no-blocking rule stalls the session — the cost of
+	// enforcement, measured in docs/2026-08-17-enforce-the-sink-contract.md, is
+	// a copy and an allocation per message per sink, and it is not small enough
+	// to charge to consumers who did not ask for it.
+	SinkOverflowBlock SinkOverflowPolicy = iota
+	// SinkOverflowDrop discards a record the queue has no room for and counts
+	// it. Session.SinkDropped reports the count, because a silent drop is not an
+	// observability story.
+	SinkOverflowDrop
+	// SinkOverflowEndSession ends the session with ErrSinkOverflow instead of
+	// recording a session it cannot record completely.
+	SinkOverflowEndSession
+)
+
+func (p SinkOverflowPolicy) String() string {
+	switch p {
+	case SinkOverflowBlock:
+		return "block"
+	case SinkOverflowDrop:
+		return "drop"
+	case SinkOverflowEndSession:
+		return "end_session"
+	default:
+		return "unknown"
+	}
+}
 
 // PortConfig maps one listening port to the upstreams it may route to.
 type PortConfig struct {
@@ -94,6 +133,24 @@ type Config struct {
 	// It requires a Sink: capture with nowhere to put it is a mistake worth
 	// reporting rather than a no-op worth hiding.
 	CaptureRaw bool
+
+	// SinkOverflow decides whether the core enforces the Sink contract or only
+	// documents it. It is SinkOverflowBlock by default, which documents it: sink
+	// calls happen inline on the read pump and a sink that blocks stalls the
+	// session.
+	//
+	// Setting anything else puts a queue and a goroutine per session in front of
+	// the sink, so a slow sink costs records rather than throughput. It is opt-in
+	// because it is not free — every message is copied for every sink, including
+	// sinks that never read Raw — and the measurement behind that default is in
+	// docs/2026-08-17-enforce-the-sink-contract.md.
+	SinkOverflow SinkOverflowPolicy
+	// SinkQueueDepth is how many records one session may hold for its sink.
+	//
+	// It is meaningless under SinkOverflowBlock, where nothing is queued, and
+	// setting both is rejected rather than ignored: a depth that does nothing
+	// reads like a bound that is in force.
+	SinkQueueDepth int
 
 	// Hooks run in order on every relayed message. PreFrame runs once, on the
 	// opening bytes of a client connection, before any framing.
@@ -181,6 +238,10 @@ func (c *Config) validate() error {
 		return fmt.Errorf("%w: set Codec or NewCodec, not both", ErrInvalidConfig)
 	}
 
+	if err := c.validateSinkOverflow(); err != nil {
+		return err
+	}
+
 	if c.Prober == nil {
 		c.Prober = DialProber{}
 	}
@@ -229,6 +290,41 @@ func (c *Config) validate() error {
 				slog.Any("err", err),
 			)
 		}
+	}
+
+	return nil
+}
+
+// validateSinkOverflow checks the queue settings and fills the depth in.
+//
+// It runs before the nopSink default is applied, so it can tell a consumer who
+// asked for a policy without a sink from one who configured neither. A queue in
+// front of nothing is a mistake worth naming rather than a no-op worth hiding —
+// the same reason CaptureRaw refuses to run without somewhere to record to.
+func (c *Config) validateSinkOverflow() error {
+	switch c.SinkOverflow {
+	case SinkOverflowBlock:
+		if c.SinkQueueDepth != 0 {
+			return fmt.Errorf(
+				"%w: SinkQueueDepth is meaningless under SinkOverflowBlock, which queues nothing",
+				ErrInvalidConfig,
+			)
+		}
+
+		return nil
+	case SinkOverflowDrop, SinkOverflowEndSession:
+	default:
+		return fmt.Errorf("%w: unknown SinkOverflow policy %d", ErrInvalidConfig, uint8(c.SinkOverflow))
+	}
+
+	if c.Sink == nil {
+		return fmt.Errorf("%w: SinkOverflow %s needs a Sink to queue for", ErrInvalidConfig, c.SinkOverflow)
+	}
+	if c.SinkQueueDepth < 0 {
+		return fmt.Errorf("%w: SinkQueueDepth cannot be negative", ErrInvalidConfig)
+	}
+	if c.SinkQueueDepth == 0 {
+		c.SinkQueueDepth = defaultSinkQueueDepth
 	}
 
 	return nil

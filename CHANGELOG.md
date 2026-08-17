@@ -5,6 +5,52 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+## [Unreleased]
+
+### Added
+
+- `Session.SinkID`, which reports the identifier a `Sink` assigned the session at
+  `OpenSession`.
+
+  A `Sink` is handed an int64 and never a `*Session`, deliberately: a sink
+  records, it does not steer. That leaves a sink with no way back to the session
+  it is recording, and one sink needs it — a recorder whose storage cannot keep
+  up has to end the session rather than write a recording with a hole in it,
+  because a recording that does not replay is not evidence and still looks like a
+  file. A hook holds both halves, so `SinkID` is what lets a consumer pair them.
+
+  The `Sink` interface is unchanged: nothing in the core acts on this, and a sink
+  that only records never needs it.
+
+- `Config.SinkOverflow` and `Config.SinkQueueDepth`, which let the core enforce
+  the `Sink` contract instead of only documenting it. `SinkOverflowDrop` puts a
+  bounded queue and one goroutine per session in front of the sink and counts
+  what will not fit; `SinkOverflowEndSession` ends the session with the new
+  `ErrSinkOverflow` instead of recording one it cannot record completely.
+  `Session.SinkDropped` reports the count, because a silent drop is not an
+  observability story.
+
+  **The default did not change, and that is the finding rather than an
+  omission.** `SinkOverflowBlock` still calls the sink inline on the read pump,
+  because a queued call has to outlive its arguments and `MessageRecord.Raw` is
+  borrowed — so enforcement means copying every message for every sink,
+  including sinks that never read it. Measured on the relay path, that copy adds
+  25% to a 100-byte message and 154% to a 1500-byte one, and doubles the
+  allocation count at both sizes. `docs/2026-08-17-enforce-the-sink-contract.md`
+  carries the benchmark and the reasoning; `sink_bench_test.go` reproduces it.
+
+  The rule was worth enforcing for somebody and not for everybody: this
+  repository's own capture sink blocked on the read pump for three releases, and
+  `MultiSink` fanned that stall out to the sink beside it. A consumer running a
+  sink it does not control can now buy the guarantee; one that is not paying for
+  a problem it does not have keeps today's cost exactly.
+
+  `OpenSession` is called inline under every policy, and ordering within a
+  session is preserved under all of them. Raw chunks share the message queue, so
+  a sink parked in `RawChunk` no longer couples the two directions through
+  `captureConn`'s mutex — the one stall a per-direction queue could not have
+  confined.
+
 ## [0.3.0] — 2026-08-17
 
 ### Added

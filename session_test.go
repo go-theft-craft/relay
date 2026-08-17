@@ -547,3 +547,16 @@ func TestSessionCrossDirectionSwap(t *testing.T) {
 		t.Fatalf("client received %q, want secret", got)
 	}
 }
+
+// TestSinkIDNamesTheRecordTheSinkOpened is what lets something on the sink side
+// find the session it is recording. A Sink is handed an identifier and never the
+// session, so without this a sink that must act on the session — a recorder
+// ending one that outran its storage — has no way back.
+func TestSinkIDNamesTheRecordTheSinkOpened(t *testing.T) {
+	sink := &recordingSink{nextID: 41}
+	h := newHarness(t, Config{Sink: sink})
+
+	if got := h.session.SinkID(); got != 42 {
+		t.Fatalf("SinkID() = %d, want 42 — the id OpenSession returned", got)
+	}
+}

@@ -37,13 +37,16 @@ type captureChunk struct {
 type captureConn struct {
 	net.Conn
 
-	sink Sink
-	ctx  context.Context
+	ctx context.Context
 
 	// mu orders the two directions against each other. Sink.RawChunk is called
-	// under it, which is safe because the Sink contract forbids blocking, and it
-	// is what makes the recorded interleaving match the wire.
+	// under it, which is what makes the recorded interleaving match the wire —
+	// and which is why a sink that blocks there stalls both directions at once
+	// rather than only the one it was called from. That is the one stall a
+	// per-direction pump cannot confine, and it is why the sink installed here
+	// is the session's, queue and all, rather than the configured one.
 	mu      sync.Mutex
+	sink    Sink
 	id      int64
 	live    bool
 	pending []captureChunk
@@ -51,8 +54,11 @@ type captureConn struct {
 	dropped bool
 }
 
-func newCaptureConn(ctx context.Context, conn net.Conn, sink Sink) *captureConn {
-	return &captureConn{Conn: conn, sink: sink, ctx: ctx}
+// newCaptureConn wraps a connection before there is a session to record it
+// against. The sink arrives with activate, which is also when the identifier
+// every record is keyed by does.
+func newCaptureConn(ctx context.Context, conn net.Conn) *captureConn {
+	return &captureConn{Conn: conn, ctx: ctx}
 }
 
 // Read records what arrived from the client, which is traffic bound for the
@@ -106,10 +112,11 @@ func (c *captureConn) record(dir Direction, b []byte) {
 // activate attaches the capture to a sink session and flushes whatever was held
 // while there was nothing to attach it to. It reports whether anything was
 // dropped before it ran.
-func (c *captureConn) activate(id int64) bool {
+func (c *captureConn) activate(sink Sink, id int64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.sink = sink
 	c.id = id
 	c.live = true
 

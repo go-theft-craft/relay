@@ -22,4 +22,9 @@ var (
 	// ErrSwapPending reports a mid-stream transform swap attempted while bytes
 	// from before the boundary were still unread. See Conduit.Swap.
 	ErrSwapPending = errors.New("relay: swap with bytes still buffered")
+	// ErrSinkOverflow reports a session's sink queue filling up under
+	// SinkOverflowEndSession. It is the cause the session ends with, and it
+	// reaches Config.OnSessionError, because a recording with a hole in it that
+	// nobody was told about is worse than a session that stopped.
+	ErrSinkOverflow = errors.New("relay: sink queue overflow")
 )

@@ -669,3 +669,117 @@ func TestEndToEndRecording(t *testing.T) {
 		}
 	}
 }
+
+// wedgedSink is a recording destination that never finishes a write, which is
+// what a full disk, a slow disk, or a network filesystem looks like to a
+// recorder.
+type wedgedSink struct{ release chan struct{} }
+
+func (w wedgedSink) Observe(ctx context.Context, _ protocol.Observation) error {
+	select {
+	case <-w.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (wedgedSink) Close() error { return nil }
+
+// TestEndToEndASessionThatOutrunsItsRecorderIsEnded is the end of the chain the
+// capture sink's own tests can only prove in pieces: relay hands the recorder a
+// session identifier and a hook hands it the session, so a recorder that cannot
+// keep up ends the connection instead of writing a recording with a hole in it.
+//
+// The alternative — dropping records, which the SQLite sink beside it does — is
+// right for a telemetry table and wrong here, because a recording that does not
+// replay is not evidence and still looks like a file.
+func TestEndToEndASessionThatOutrunsItsRecorderIsEnded(t *testing.T) {
+	up := newStubServer(t)
+
+	limits, err := protocol.NewLimits()
+	if err != nil {
+		t.Fatalf("NewLimits: %v", err)
+	}
+
+	inner, err := java.NewFramer(limits)
+	if err != nil {
+		t.Fatalf("NewFramer: %v", err)
+	}
+
+	wedged := wedgedSink{release: make(chan struct{})}
+	defer close(wedged.release)
+
+	faults := make(chan error, 8)
+
+	recorder, err := capturesink.NewRecorder(capturesink.Options{
+		Descriptor: protocols.Default(),
+		Limits:     limits,
+		Framer:     inner,
+		// One record of slack, so the first exchange is enough to outrun it.
+		QueueDepth: 1,
+		CloseGrace: 100 * time.Millisecond,
+		OpenSink: func(string, capturepkg.Header) (capturesink.RecordSink, error) {
+			return wedged, nil
+		},
+		OnError: func(err error) { faults <- err },
+	})
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+
+	addr, _, _, _ := runExampleProxyRecording(t, up.addr(), false, recorder, recorder.Bind())
+
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+
+	descriptor := protocols.Default()
+
+	framer, err := minecraft.NewFramer(limits)
+	if err != nil {
+		t.Fatalf("NewFramer: %v", err)
+	}
+
+	session, err := descriptor.NewSession(protocol.RoleClient, limits)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", addr, err)
+	}
+
+	port, err := net.LookupPort("tcp", portText)
+	if err != nil {
+		t.Fatalf("port: %v", err)
+	}
+
+	handshake, err := protocols.Handshake(descriptor, host, uint16(port), 1)
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+
+	writePacket(t, framer, session, conn, handshake)
+	session.SetState(protocol.State("status"))
+	writePacket(t, framer, session, conn, statusRequestPacket(t, descriptor))
+
+	// The proxy's answer is a closed connection rather than a status document.
+	if _, err := framer.ReadMessage(bufio.NewReader(conn)); err == nil {
+		t.Fatal("the proxy answered the client while its recorder was wedged; the session ran on unrecorded")
+	}
+
+	select {
+	case fault := <-faults:
+		if !strings.Contains(fault.Error(), "fell behind") {
+			t.Errorf("the fault does not say the recorder fell behind: %v", fault)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the recorder lost records and reported nothing")
+	}
+}

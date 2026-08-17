@@ -107,11 +107,16 @@ func WithFlushInterval(d time.Duration) Option {
 // SQLite records sessions and messages to a local database.
 //
 // Every write goes through a buffered channel to one writer goroutine, which
-// batches into a transaction and commits on a full batch or a tick. The core's
-// Sink contract forbids blocking, and this is why that contract is the sink's
-// problem rather than the framework's: only the implementation knows how deep
-// its queue should be for the storage behind it, and a core that owned this
-// goroutine could not size it for anyone.
+// batches into a transaction and commits on a full batch or a tick.
+//
+// This queue exists for the batching, not for the contract. relay.Config now
+// offers a queue of its own — SinkOverflowDrop does the same counting this one
+// does — but putting it in front of this sink would add a hop without removing a
+// reason: records still have to arrive at one goroutine to be batched into one
+// transaction, and only the implementation knows how deep its queue should be
+// for the storage behind it. A consumer running this sink alone has no use for
+// the core's policy; one running it beside a slower sink might, and it composes
+// either way.
 //
 // When the queue is full the sink drops records and counts the drops. Dropping
 // is the right failure for a recorder: stalling a read pump to preserve a log

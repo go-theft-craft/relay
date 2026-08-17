@@ -55,6 +55,15 @@ type Session struct {
 	cfg    *Config
 	sinkID int64
 
+	// sink is where this session's records go. It is Config.Sink itself under
+	// SinkOverflowBlock, and a pump in front of it otherwise, so every call site
+	// below is written once and the policy is decided in one place.
+	sink Sink
+	// sinkPump is the same value as sink when there is one, kept typed so the
+	// session can start it, stop it, and read what it dropped. It is nil under
+	// SinkOverflowBlock.
+	sinkPump *sinkPump
+
 	// codec is this session's decoder. It is per session rather than read from
 	// the config on every message because a real protocol codec carries
 	// connection state — a state machine, a pair of decoders — and sharing one
@@ -120,6 +129,14 @@ func newSession(parent context.Context, cfg *Config, client, upstream net.Conn, 
 		meta:          make(map[string]any),
 	}
 
+	s.sink = cfg.Sink
+	if cfg.SinkOverflow != SinkOverflowBlock {
+		s.sinkPump = newSinkPump(cfg.Sink, cfg.SinkOverflow, cfg.SinkQueueDepth, cfg.DrainGrace, func() {
+			s.cancel(ErrSinkOverflow)
+		})
+		s.sink = s.sinkPump
+	}
+
 	if upstream != nil {
 		s.joinUpstream(upstream, info.UpstreamAddr)
 	}
@@ -166,6 +183,32 @@ func (s *Session) Snapshot() SessionSnapshot {
 	defer s.mu.RUnlock()
 
 	return SessionSnapshot{ID: s.ID, Info: s.Info, Meta: maps.Clone(s.meta)}
+}
+
+// SinkID returns the identifier this session's Sink assigned it at OpenSession,
+// which is the only name a sink knows the session by.
+//
+// It exists so something on the sink side can find the session that feeds it. A
+// Sink is handed an int64 and never a *Session, deliberately — a sink records,
+// it does not steer — so a sink that needs to act on the session it is recording
+// has no way back without this. The case that forced it: a recorder whose
+// storage cannot keep up has to end the session rather than write a file with a
+// hole in it, and ending it means reaching Close.
+func (s *Session) SinkID() int64 { return s.sinkID }
+
+// SinkDropped reports how many records this session's sink queue had no room
+// for. It is always zero under SinkOverflowBlock, where nothing is queued and so
+// nothing can be dropped.
+//
+// It is exported because a silent drop is not an observability story: a
+// consumer that chose SinkOverflowDrop chose to lose records under load and has
+// to be able to find out that it did.
+func (s *Session) SinkDropped() uint64 {
+	if s.sinkPump == nil {
+		return 0
+	}
+
+	return s.sinkPump.dropped.Load()
 }
 
 // Close ends the session. It is safe to call from anywhere and any number of
@@ -258,7 +301,7 @@ func (s *Session) Inject(dir Direction, raw []byte) error {
 		return err
 	}
 
-	s.cfg.Sink.Message(s.ctx, s.sinkID, MessageRecord{Dir: dir, Raw: raw, At: time.Now()})
+	s.sink.Message(s.ctx, s.sinkID, MessageRecord{Dir: dir, Raw: raw, At: time.Now()})
 
 	return nil
 }
@@ -287,7 +330,7 @@ func (s *Session) InjectDecoded(dir Direction, value any) error {
 		return err
 	}
 
-	s.cfg.Sink.Message(s.ctx, s.sinkID, MessageRecord{Dir: dir, Raw: raw, Decoded: value, At: time.Now()})
+	s.sink.Message(s.ctx, s.sinkID, MessageRecord{Dir: dir, Raw: raw, Decoded: value, At: time.Now()})
 
 	return nil
 }
@@ -295,6 +338,14 @@ func (s *Session) InjectDecoded(dir Direction, value any) error {
 // run drives the session until either direction fails, then shuts it down.
 func (s *Session) run() {
 	defer s.finish()
+
+	// The pump starts here rather than at construction because the sink
+	// identifier is not assigned until the upstream is joined, and because a
+	// session that never runs — a pre-frame hook answered the connection, a
+	// codec failed to build — should not leave a goroutine behind.
+	if s.sinkPump != nil {
+		s.sinkPump.start(s.ctx, s.sinkID)
+	}
 
 	go s.closeWhenDone()
 
@@ -353,7 +404,15 @@ func (s *Session) drain() {
 func (s *Session) finish() {
 	// The parent context is already cancelled by the time a shutdown-triggered
 	// session ends, and a sink still has to be told the session closed.
-	s.cfg.Sink.CloseSession(context.WithoutCancel(s.ctx), s.sinkID)
+	s.sink.CloseSession(context.WithoutCancel(s.ctx), s.sinkID)
+
+	// Both read pumps have ended by the time this runs, so the queue holds
+	// everything this session will ever produce and CloseSession is behind all
+	// of it. Waiting here is what makes a returned CloseSession mean a finished
+	// record; the wait is bounded, for the same reason the write drain is.
+	if s.sinkPump != nil {
+		s.sinkPump.stop()
+	}
 
 	if s.onFinish != nil {
 		s.onFinish()
@@ -363,6 +422,17 @@ func (s *Session) finish() {
 // report hands a session-ending fault to the consumer. A clean peer close and a
 // deliberate shutdown are not faults and are not reported.
 func (s *Session) report(err error) {
+	// A session ended by a full sink queue reports that, and not whatever the
+	// read pumps failed with once the connections were closed under them. Those
+	// failures are net.ErrClosed, which is exactly the noise the filter below
+	// exists to swallow — so without asking for the cause first, the one fault
+	// worth telling the consumer about would be swallowed with it.
+	if cause := context.Cause(s.ctx); errors.Is(cause, ErrSinkOverflow) {
+		s.cfg.OnSessionError(s, cause)
+
+		return
+	}
+
 	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, ErrSessionClosed) {
 		return
 	}
@@ -425,7 +495,7 @@ func (s *Session) relay(dir Direction, raw []byte) error {
 		return err
 	}
 
-	s.cfg.Sink.Message(s.ctx, s.sinkID, MessageRecord{
+	s.sink.Message(s.ctx, s.sinkID, MessageRecord{
 		Dir:     dir,
 		Desc:    m.Desc,
 		Raw:     out,

@@ -19,6 +19,19 @@ import (
 // failing the connection. The proxy's job is to relay; losing a recording is
 // worth reporting, not worth disconnecting a player over. OpenSession's error
 // is returned only when every sink refused.
+//
+// The fan-out is serial, and that is worth stating rather than discovering: one
+// slow child delays every sibling behind it, because they share the goroutine
+// this call arrived on. That is how a stalled capture sink used to stall the
+// SQLite sink beside it.
+//
+// It stays serial. Giving each child a goroutine would mean a queue each, since
+// a goroutine with no queue is just a slower call, and relay.Config.SinkOverflow
+// already offers exactly that queue one level up. Putting it there bounds the
+// damage for every sink at once and costs one goroutine per session rather than
+// one per session per child. What it does not do is isolate the children from
+// each other: a slow child still delays its siblings, but the delay now costs
+// queued records instead of the read pump.
 type MultiSink struct {
 	sinks []relay.Sink
 

@@ -241,7 +241,7 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 	// there is a sink session to attach them to.
 	var capture *captureConn
 	if p.cfg.CaptureRaw {
-		capture = newCaptureConn(ctx, client, p.cfg.Sink)
+		capture = newCaptureConn(ctx, client)
 		client = capture
 	}
 
@@ -322,7 +322,7 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 
 	s.sinkID = sinkID
 
-	if capture != nil && capture.activate(sinkID) {
+	if capture != nil && capture.activate(s.sink, sinkID) {
 		p.cfg.OnSessionError(s, fmt.Errorf(
 			"relay: raw capture dropped bytes before the session opened; over %d were buffered",
 			capturePendingLimit,

@@ -137,6 +137,40 @@ Two things the swap guarantees, and one it does not:
   problem. A proxy that swaps at the same message an endpoint would is exactly
   as correct as that endpoint, and no more.
 
+## Sinks, and what happens when one is slow
+
+A `Sink` records what crossed the wire, and no method of it may block. By
+default that rule is documented rather than enforced: sink calls happen inline
+on the read pump, so a sink that blocks stalls the session and, through TCP
+backpressure, its peer.
+
+`Config.SinkOverflow` changes that, per proxy:
+
+| Policy | What a slow sink costs |
+| --- | --- |
+| `SinkOverflowBlock` (default) | the session — the call is inline, exactly as before |
+| `SinkOverflowDrop` | records — dropped and counted at `Session.SinkDropped` |
+| `SinkOverflowEndSession` | the session, deliberately, with `ErrSinkOverflow` |
+
+The last two put a bounded queue and one goroutine per session in front of the
+sink; `Config.SinkQueueDepth` sizes it. Ordering within a session is preserved,
+messages and raw chunks share the one queue so the interleaving is the wire's,
+and `CloseSession` goes through the queue last so it still means *everything
+before this*.
+
+**Why the default is the unenforced one.** A queued call outlives its arguments,
+so the core has to copy every message for every sink — including sinks that
+never look at `Raw`. Measured, that copy adds 25% to a 100-byte message and 154%
+to a 1500-byte one, and it doubles the allocation count at every size. The
+numbers and the method are in
+[`docs/2026-08-17-enforce-the-sink-contract.md`](docs/2026-08-17-enforce-the-sink-contract.md).
+Enforcement is worth it when you have a sink you do not control or one whose
+storage can stall; it is not worth charging to everyone by default.
+
+`OpenSession` is always called inline, under every policy. It returns an error
+and it assigns the identifier every later call is keyed by, so there is nothing
+useful to do with it asynchronously.
+
 ## Raw capture
 
 `Config.CaptureRaw` records every byte crossing the client connection to

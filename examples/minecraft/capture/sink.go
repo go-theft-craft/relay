@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	protocol "github.com/go-theft-craft/minecraft-protocol"
@@ -33,10 +34,45 @@ type Options struct {
 	// appended to it, because a trace that cannot say what it recorded against
 	// is not evidence.
 	Note string
+	// QueueDepth bounds the records waiting to be written for one session.
+	// Zero means DefaultQueueDepth.
+	//
+	// It is a bound rather than a buffer because of what a full queue means
+	// here: the recorder is losing to the disk, and the only outcomes are a
+	// recording with a hole in it or a session that ends. This sink chooses the
+	// second, so the depth is how much burst it absorbs before making that
+	// choice, and the memory it may hold is roughly depth × frame size.
+	QueueDepth int
+	// CloseGrace bounds how long CloseSession waits for the records still queued
+	// when a session ends. Zero means DefaultCloseGrace.
+	//
+	// Waiting is what makes a returned CloseSession mean a finished file. The
+	// bound is there because one write's duration is not bounded by anything: a
+	// proxy that can hang its session teardown on a wedged disk has moved the
+	// stall rather than removed it.
+	CloseGrace time.Duration
+	// OpenSink builds one session's destination. Zero means a capture file named
+	// after the session in Dir, which is what a recording is for.
+	//
+	// It is here because the queue below made the destination's speed matter: a
+	// bound that ends sessions has to be testable against a destination that
+	// holds a write open, and a real file never does.
+	OpenSink func(name string, header mccapture.Header) (RecordSink, error)
 	// OnError receives a fault that a Sink method cannot return. Recording
 	// failures must be loud: a truncated oracle that reports nothing is worse
 	// than no oracle, because it still looks like evidence.
 	OnError func(error)
+}
+
+// RecordSink is one session's destination: records in order, then a trailer.
+//
+// mccapture.FileSink is the implementation Options builds by default.
+// protocol.ObservationSink is the half minecraft-protocol names; Close is the
+// half that makes a recording complete, because the trailer is what gives a
+// capture a digest to replay against.
+type RecordSink interface {
+	protocol.ObservationSink
+	Close() error
 }
 
 // Recorder writes one capture file per session, in the format
@@ -46,6 +82,20 @@ type Options struct {
 // per-session one, so the file bookkeeping lives here: a proxy holds many
 // sessions at once and each needs its own recording, its own frame numbering,
 // and its own clock origin.
+//
+// It keeps its own queue even though relay.Config.SinkOverflowEndSession now
+// offers one that does the same job, and the reason is that the two are not
+// quite the same job. The core's queue holds relay.MessageRecord values and can
+// only end the session; this one holds finished capture records — bytes copied,
+// sequence assigned, transition applied — so what it absorbs is the disk being
+// slow rather than the pump being fast, and its CloseGrace is what makes a
+// returned CloseSession mean a finished file.
+//
+// Running both is two bounded queues in a row, which is a hop worth removing
+// eventually. Not yet: the core's policy has not been through a real server, and
+// the recording it would be trusted to bound is the evidence everything else
+// here is judged against. The one to remove is decided after that run, not
+// before it.
 type Recorder struct {
 	opts Options
 
@@ -57,10 +107,32 @@ type Recorder struct {
 // recording is one session's file and the counters that describe it.
 //
 // The mutex is per recording rather than per Recorder: both read pumps of one
-// session record concurrently, but two sessions share nothing.
+// session record concurrently, but two sessions share nothing. It covers the
+// counters and the state machine below, which run on the pump; it does not cover
+// sink, which the writer goroutine owns from the header to the trailer and which
+// nothing else touches.
 type recording struct {
+	// queue carries finished records to the writer goroutine, which is what
+	// keeps the file's write off the read pump. Records are complete by the time
+	// they are queued — bytes copied, sequence assigned — so the writer only
+	// writes.
+	queue chan protocol.Observation
+	// stop asks the writer to drain and finish; done reports that it has.
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	// ctx is the session context with its cancellation removed. The writer
+	// outlives the session by whatever is still queued at close, and a recording
+	// that stopped writing because the client hung up is exactly the truncated
+	// file this sink exists to avoid.
+	ctx context.Context
+	// end closes the session feeding this recording, once Bind's hook has seen
+	// it. It is nil until then, and stays nil for a consumer that never wired
+	// the hook.
+	end atomic.Pointer[func()]
+
 	mu       sync.Mutex
-	sink     *mccapture.FileSink
+	sink     RecordSink
 	started  time.Time
 	sequence uint64
 	frame    uint64
@@ -74,12 +146,24 @@ type recording struct {
 	// relays nothing: it is asked one question per frame.
 	sensitive        protocol.SensitiveFrames
 	sensitiveSession protocol.Session
-	failed           bool
+
+	// failed is atomic because either side can set it: the pump when the queue
+	// overflows, the writer when the file refuses a record.
+	failed atomic.Bool
 }
+
+// DefaultQueueDepth is the per-session record queue used when Options leaves
+// QueueDepth zero. A frame produces at most two records, so this absorbs a few
+// hundred frames of burst.
+const DefaultQueueDepth = 1024
+
+// DefaultCloseGrace is how long CloseSession waits for a recording's queued
+// records when Options leaves CloseGrace zero.
+const DefaultCloseGrace = 30 * time.Second
 
 // NewRecorder validates the options and prepares the output directory.
 func NewRecorder(opts Options) (*Recorder, error) {
-	if opts.Dir == "" {
+	if opts.Dir == "" && opts.OpenSink == nil {
 		return nil, fmt.Errorf("capture: no output directory")
 	}
 	if opts.Descriptor == nil {
@@ -91,9 +175,22 @@ func NewRecorder(opts Options) (*Recorder, error) {
 	if opts.OnError == nil {
 		opts.OnError = func(err error) { slog.Default().Error("capture", slog.Any("err", err)) }
 	}
+	if opts.QueueDepth <= 0 {
+		opts.QueueDepth = DefaultQueueDepth
+	}
+	if opts.CloseGrace <= 0 {
+		opts.CloseGrace = DefaultCloseGrace
+	}
 
-	if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
-		return nil, fmt.Errorf("capture: create %s: %w", opts.Dir, err)
+	if opts.OpenSink == nil {
+		dir := opts.Dir
+		opts.OpenSink = func(name string, header mccapture.Header) (RecordSink, error) {
+			return mccapture.NewFileSink(filepath.Join(dir, name), header)
+		}
+
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("capture: create %s: %w", dir, err)
+		}
 	}
 
 	return &Recorder{opts: opts, sessions: make(map[int64]*recording)}, nil
@@ -101,7 +198,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 
 // OpenSession implements relay.Sink. It creates the session's file and writes
 // the header before any record can reach it.
-func (r *Recorder) OpenSession(_ context.Context, info relay.SessionInfo) (int64, error) {
+func (r *Recorder) OpenSession(ctx context.Context, info relay.SessionInfo) (int64, error) {
 	started := info.OpenedAt
 	if started.IsZero() {
 		started = time.Now()
@@ -114,7 +211,7 @@ func (r *Recorder) OpenSession(_ context.Context, info relay.SessionInfo) (int64
 
 	name := fmt.Sprintf("%s-%03d.mccap", started.UTC().Format("20060102-150405"), id)
 
-	sink, err := mccapture.NewFileSink(filepath.Join(r.opts.Dir, name), mccapture.Header{
+	sink, err := r.opts.OpenSink(name, mccapture.Header{
 		Protocol:          r.opts.Descriptor.ID(),
 		FrameBytes:        r.opts.Limits.FrameBytes(),
 		DecompressedBytes: r.opts.Limits.DecompressedBytes(),
@@ -125,7 +222,15 @@ func (r *Recorder) OpenSession(_ context.Context, info relay.SessionInfo) (int64
 		return 0, fmt.Errorf("capture: open %s: %w", name, err)
 	}
 
-	entry := &recording{sink: sink, started: started, state: protocol.State("handshaking")}
+	entry := &recording{
+		queue:   make(chan protocol.Observation, r.opts.QueueDepth),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+		ctx:     context.WithoutCancel(ctx),
+		sink:    sink,
+		started: started,
+		state:   protocol.State("handshaking"),
+	}
 
 	// The sensitivity oracle is optional: a protocol that declares no sensitive
 	// frames leaves it nil and every frame records its bytes.
@@ -139,6 +244,8 @@ func (r *Recorder) OpenSession(_ context.Context, info relay.SessionInfo) (int64
 	r.mu.Lock()
 	r.sessions[id] = entry
 	r.mu.Unlock()
+
+	go r.write(entry)
 
 	return id, nil
 }
@@ -169,7 +276,7 @@ func (r *Recorder) Message(ctx context.Context, id int64, record relay.MessageRe
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	if entry.failed {
+	if entry.failed.Load() {
 		return
 	}
 
@@ -212,8 +319,11 @@ func (r *Recorder) Message(ctx context.Context, id int64, record relay.MessageRe
 		OriginalLen: len(wire),
 		Redacted:    redacted,
 	}
+	// The bytes are copied because the record outlives this call now: relay
+	// borrows Raw for the duration of Message, and the frame the Framer rebuilt
+	// is no safer, since one Framer serves every session.
 	if !redacted {
-		raw.Bytes = wire
+		raw.Bytes = append([]byte(nil), wire...)
 	}
 
 	r.observe(ctx, entry, raw)
@@ -240,7 +350,7 @@ func (r *Recorder) Message(ctx context.Context, id int64, record relay.MessageRe
 			Redacted:    redacted,
 		}
 		if !redacted {
-			packet.Bytes = record.Raw
+			packet.Bytes = append([]byte(nil), record.Raw...)
 		}
 
 		r.observe(ctx, entry, packet)
@@ -260,6 +370,19 @@ func (*Recorder) RawChunk(context.Context, int64, relay.Direction, []byte) {}
 
 // CloseSession implements relay.Sink. It writes the trailer, which is what
 // makes a recording complete and gives it a digest to replay against.
+//
+// This is the one method here that waits, and it is the one that can: relay
+// calls it from the session's finish path, after both read pumps have stopped,
+// so what it holds up is a session that is already over rather than traffic.
+// Waiting is what lets it promise that a returned CloseSession means a finished
+// file — the trailer has to land after the records still queued, not in front of
+// them.
+//
+// The wait has a grace period all the same. What is queued is bounded by
+// QueueDepth, but how long one write takes is not, and a proxy whose session
+// teardown can hang on a wedged disk has traded a stalled pump for a stalled
+// shutdown. Past the grace the writer is left to finish and close the file on its
+// own, and the fault is reported.
 func (r *Recorder) CloseSession(_ context.Context, id int64) {
 	r.mu.Lock()
 	entry := r.sessions[id]
@@ -270,35 +393,156 @@ func (r *Recorder) CloseSession(_ context.Context, id int64) {
 		return
 	}
 
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	entry.stopOnce.Do(func() { close(entry.stop) })
 
-	if err := entry.sink.Close(); err != nil && !entry.failed {
+	timer := time.NewTimer(r.opts.CloseGrace)
+	defer timer.Stop()
+
+	select {
+	case <-entry.done:
+	case <-timer.C:
+		r.opts.OnError(fmt.Errorf(
+			"capture: recording still writing %s after its session closed; left to finish on its own",
+			r.opts.CloseGrace,
+		))
+	}
+}
+
+// Bind returns a hook that tells the recorder which session feeds which
+// recording.
+//
+// A relay.Sink is handed a session identifier and never the session, which is
+// right for something whose job is to record. This recorder has one thing it
+// must do to the session it records: end it, when the connection outruns the
+// disk and the alternative is a recording with a hole in it. A hook is the one
+// place a consumer holds both halves — relay.Session.SinkID names the recording,
+// and Close ends the session — so wiring this hook is what turns the overflow
+// path from a log line into an outcome.
+//
+// It is optional. A recorder without it still refuses to write a torn recording;
+// it just cannot stop the session that tore it.
+func (r *Recorder) Bind() relay.Hook {
+	return relay.HookFunc(func(_ context.Context, session *relay.Session, _ *relay.Message) (relay.Action, error) {
+		r.Attach(session.SinkID(), session.Close)
+
+		return relay.Forward, nil
+	})
+}
+
+// Attach names what ends the session feeding one recording. Bind is the wiring
+// that calls it with a relay session; this is the seam a test can reach.
+//
+// The first call wins and later ones are ignored, because Bind's hook runs on
+// every message and only the first has anything to say.
+func (r *Recorder) Attach(id int64, end func()) {
+	entry := r.lookup(id)
+	if entry == nil || end == nil || entry.end.Load() != nil {
+		return
+	}
+
+	entry.end.CompareAndSwap(nil, &end)
+}
+
+// observe hands one record to the writer goroutine, or ends the session.
+//
+// Sequence numbering and the queueing happen together, under the recording's
+// mutex, because the file's records must arrive in the order they were numbered
+// and both read pumps are numbering. The send itself never blocks — that is the
+// entire point of the queue — so holding the mutex across it costs nothing.
+//
+// It must be called with the recording's mutex held.
+func (r *Recorder) observe(_ context.Context, entry *recording, observation protocol.Observation) {
+	entry.sequence++
+	observation.Sequence = entry.sequence
+
+	select {
+	case entry.queue <- observation:
+	default:
+		// A dropped record would be the cheap way out here, and it is the wrong
+		// one: the SQLite sink beside this one drops and counts because a gap in
+		// a telemetry table is a number to look at, while a gap in a recording is
+		// a file that will not replay and therefore is not evidence. Losing the
+		// session is the honest way to say the recorder lost.
+		r.fail(entry, fmt.Errorf(
+			"capture: recorder fell behind the connection: %d queued records unwritten, ending session",
+			cap(entry.queue),
+		))
+	}
+}
+
+// write is one recording's writer goroutine: the only place the file is written
+// while the session is live.
+//
+// It exists because relay calls Message on the read pump, before forwarding, so
+// a synchronous write parks the connection for as long as the disk takes. That
+// held while the page cache absorbed it and stops holding on a full disk, a slow
+// disk, or a network filesystem.
+func (r *Recorder) write(entry *recording) {
+	defer close(entry.done)
+
+	for {
+		select {
+		case observation := <-entry.queue:
+			r.persist(entry, observation)
+		case <-entry.stop:
+			// Drain before leaving. What is queued at close belongs in the file,
+			// and the trailer has to come after it.
+			for {
+				select {
+				case observation := <-entry.queue:
+					r.persist(entry, observation)
+				default:
+					r.finish(entry)
+
+					return
+				}
+			}
+		}
+	}
+}
+
+// finish writes the trailer, which is what makes a recording complete and gives
+// it a digest to replay against.
+//
+// It belongs to the writer rather than to CloseSession because the two must not
+// both touch the file, and because the writer is the one that knows the records
+// are all in. CloseSession normally waits for this; when it gives up waiting,
+// this still runs.
+func (r *Recorder) finish(entry *recording) {
+	if err := entry.sink.Close(); err != nil && !entry.failed.Load() {
 		r.opts.OnError(fmt.Errorf("capture: close recording: %w", err))
 	}
 }
 
-// observe writes one record and reports the first failure. It must be called
-// with the recording's mutex held.
-func (r *Recorder) observe(ctx context.Context, entry *recording, observation protocol.Observation) {
-	entry.sequence++
-	observation.Sequence = entry.sequence
+// persist writes one record, or reports the first failure and stops recording.
+func (r *Recorder) persist(entry *recording, observation protocol.Observation) {
+	if entry.failed.Load() {
+		return
+	}
 
-	if err := entry.sink.Observe(ctx, observation); err != nil {
+	if err := entry.sink.Observe(entry.ctx, observation); err != nil {
 		r.fail(entry, fmt.Errorf("capture: write record: %w", err))
 	}
 }
 
-// fail reports once and stops recording this session. A recording that lost a
-// record in the middle is not evidence, and continuing to append to it would
-// hide which part is missing.
+// fail reports once, stops recording this session, and ends the session if it
+// can reach it.
+//
+// A recording that lost a record in the middle is not evidence, and continuing
+// to append to it would hide which part is missing. Ending the session says the
+// same thing to the client: this connection is no longer being recorded, so it
+// stops rather than running on unrecorded. It needs Bind's hook to have run; with
+// no way back to the session, the loud error is all this can do.
 func (r *Recorder) fail(entry *recording, err error) {
-	if entry.failed {
+	if entry.failed.Swap(true) {
 		return
 	}
 
-	entry.failed = true
 	r.opts.OnError(err)
+
+	if end := entry.end.Load(); end != nil {
+		(*end)()
+	}
 }
 
 func (r *Recorder) lookup(id int64) *recording {

@@ -2,8 +2,11 @@ package capture_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -469,4 +472,148 @@ func packetRecords(records []mccapture.Record) []mccapture.Record {
 	}
 
 	return packets
+}
+
+// heldSink is a destination that holds every write until the test lets it go.
+//
+// A real file never blocks long enough to test what happens when the disk loses
+// to the wire, and that is the case the queue exists for: a full disk, a slow
+// disk, or a network filesystem.
+type heldSink struct {
+	release chan struct{}
+
+	mu       sync.Mutex
+	observed int
+	closed   bool
+}
+
+func newHeldSink() *heldSink {
+	return &heldSink{release: make(chan struct{})}
+}
+
+func (h *heldSink) Observe(ctx context.Context, _ protocol.Observation) error {
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.observed++
+
+	return nil
+}
+
+func (h *heldSink) Close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+
+	return nil
+}
+
+func (h *heldSink) records() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.observed
+}
+
+// heldRecorder builds a recorder whose one session writes to a held sink.
+func heldRecorder(t *testing.T, depth int, onError func(error)) (*capture.Recorder, *heldSink) {
+	t.Helper()
+
+	limits := testLimits(t)
+
+	framer, err := java.NewFramer(limits)
+	if err != nil {
+		t.Fatalf("NewFramer: %v", err)
+	}
+
+	held := newHeldSink()
+
+	recorder, err := capture.NewRecorder(capture.Options{
+		Descriptor: protocols.Default(),
+		Limits:     limits,
+		Framer:     framer,
+		QueueDepth: depth,
+		OpenSink: func(string, mccapture.Header) (capture.RecordSink, error) {
+			return held, nil
+		},
+		OnError: onError,
+	})
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+
+	return recorder, held
+}
+
+// TestMessageDoesNotBlockOnTheRecordingsWrite is the relay.Sink contract, which
+// this sink used to break: Message is called on a session's read pump before the
+// message is forwarded, so a write that parks there parks the connection — and,
+// through MultiSink, starves every other sink watching the same session.
+func TestMessageDoesNotBlockOnTheRecordingsWrite(t *testing.T) {
+	t.Parallel()
+
+	recorder, held := heldRecorder(t, 64, func(err error) { t.Errorf("recorder reported: %v", err) })
+	id := openSession(t, recorder)
+
+	defer close(held.release)
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+
+		for i := range 8 {
+			recorder.Message(t.Context(), id, message(relay.ToServer, relay.Descriptor{ID: int32(i), Name: "play/position"}, []byte{byte(i)}))
+		}
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Message did not return while the recording's write was held; a read pump would be parked here")
+	}
+
+	if held.records() != 0 {
+		t.Errorf("the held sink wrote %d records; the writes should still be waiting", held.records())
+	}
+}
+
+// TestAFullQueueEndsTheSessionRatherThanLosingARecord is the difference between
+// this sink and the SQLite sink beside it. That one drops and counts, which is
+// right for a telemetry table. A recording with a hole in it does not replay, and
+// a recording that does not replay is not evidence, so this one stops.
+func TestAFullQueueEndsTheSessionRatherThanLosingARecord(t *testing.T) {
+	t.Parallel()
+
+	faults := make(chan error, 8)
+	recorder, held := heldRecorder(t, 1, func(err error) { faults <- err })
+	id := openSession(t, recorder)
+
+	defer close(held.release)
+
+	ended := make(chan struct{})
+	recorder.Attach(id, func() { close(ended) })
+
+	for i := range 32 {
+		recorder.Message(t.Context(), id, message(relay.ToServer, relay.Descriptor{ID: int32(i), Name: "play/position"}, []byte{byte(i)}))
+	}
+
+	select {
+	case err := <-faults:
+		if !strings.Contains(err.Error(), "fell behind") {
+			t.Errorf("fault does not say the recorder fell behind: %v", err)
+		}
+	default:
+		t.Fatal("32 records into a queue of 1 was reported as nothing; the recording lost frames silently")
+	}
+
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session outran its recorder and was left running unrecorded")
+	}
 }

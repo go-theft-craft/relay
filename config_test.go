@@ -26,6 +26,20 @@ func TestConfigRejectsFaults(t *testing.T) {
 		"duplicate port": func(c *Config) {
 			c.Ports = append(c.Ports, PortConfig{Port: 25565, Upstreams: []Upstream{{Addr: "127.0.0.1:2"}}})
 		},
+		// A depth under the policy that queues nothing is the fault worth
+		// naming: a bound that does nothing reads exactly like a bound that is
+		// in force.
+		"sink queue depth without a queue": func(c *Config) { c.SinkQueueDepth = 8 },
+		"negative sink queue depth": func(c *Config) {
+			c.Sink = &recordingSink{}
+			c.SinkOverflow = SinkOverflowDrop
+			c.SinkQueueDepth = -1
+		},
+		"sink policy with no sink": func(c *Config) { c.SinkOverflow = SinkOverflowEndSession },
+		"unknown sink policy": func(c *Config) {
+			c.Sink = &recordingSink{}
+			c.SinkOverflow = SinkOverflowPolicy(9)
+		},
 	}
 
 	for name, breakIt := range cases {
@@ -56,6 +70,21 @@ func TestConfigAllowsRepeatedEphemeralPorts(t *testing.T) {
 	}
 }
 
+// TestConfigFillsTheSinkQueueDepth covers the one default that only appears
+// once a policy asks for it.
+func TestConfigFillsTheSinkQueueDepth(t *testing.T) {
+	cfg := minimalConfig()
+	cfg.Sink = &recordingSink{}
+	cfg.SinkOverflow = SinkOverflowDrop
+
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate(): %v", err)
+	}
+	if cfg.SinkQueueDepth != defaultSinkQueueDepth {
+		t.Fatalf("SinkQueueDepth = %d, want %d", cfg.SinkQueueDepth, defaultSinkQueueDepth)
+	}
+}
+
 func TestConfigFillsDefaults(t *testing.T) {
 	cfg := minimalConfig()
 
@@ -80,6 +109,12 @@ func TestConfigFillsDefaults(t *testing.T) {
 	}
 	if cfg.OnSessionError == nil {
 		t.Fatal("OnSessionError was left nil")
+	}
+	if cfg.SinkOverflow != SinkOverflowBlock {
+		t.Fatalf("SinkOverflow = %s, want block — the measured default", cfg.SinkOverflow)
+	}
+	if cfg.SinkQueueDepth != 0 {
+		t.Fatalf("SinkQueueDepth = %d under Block, want it left alone", cfg.SinkQueueDepth)
 	}
 
 	numbers := []struct {

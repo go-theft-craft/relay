@@ -140,6 +140,7 @@ func run(args []string) error {
 	// point of a Sink being an interface: one connection, two things watching
 	// it, neither aware of the other.
 	sinks := relay.Sink(sink)
+	hooks := []relay.Hook{describePackets(logger)}
 	if *record != "" {
 		inner, err := java.NewFramer(limits)
 		if err != nil {
@@ -160,6 +161,10 @@ func run(args []string) error {
 		}
 
 		sinks = minecraft.NewMultiSink(sink, recorder)
+		// The recorder's hook goes first, because it is what lets a session that
+		// outruns the disk be ended instead of recorded with a hole in it, and a
+		// later hook that drops a message would keep it from ever binding.
+		hooks = append([]relay.Hook{recorder.Bind()}, hooks...)
 	}
 
 	portConfigs := make([]relay.PortConfig, 0, len(ports))
@@ -185,7 +190,7 @@ func run(args []string) error {
 		// Off by default: it costs a copy per socket read and write, and stores
 		// the whole conversation rather than a row per message.
 		CaptureRaw: *capture,
-		Hooks:      []relay.Hook{describePackets(logger)},
+		Hooks:      hooks,
 		DrainGrace: *drain,
 		Logger:     logger,
 	})

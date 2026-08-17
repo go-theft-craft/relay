@@ -95,6 +95,26 @@ session is the honest way to say so. Option 3 deserves a second look regardless,
 since the documented-not-enforced approach has now failed once inside a
 repository whose author wrote the document.
 
+### What was done
+
+Option 1, in the capture sink. Records are built on the pump as before — the
+ordering the `withhold`-before-`advance` split depends on is not something to move
+— and handed to one writer goroutine per session through a bounded queue, so the
+file's write no longer happens on the connection. A full queue fails the
+recording and ends the session rather than dropping a record, which needed a way
+back from a sink identifier to its session: `Session.SinkID` plus a hook the
+recorder supplies, since a `Sink` is handed an int64 and never a `*Session`.
+
+`CloseSession` still waits, because a returned `CloseSession` should mean a
+finished file, but the wait has a grace period now: what is queued is bounded by
+`QueueDepth`, and how long one write takes is not.
+
+Option 3 is planned rather than dropped:
+`docs/2026-08-17-enforce-the-sink-contract.md`. It opens with the measurement the
+decision actually turns on — what one copy per message per sink costs — because
+the argument in `sink.go`'s comment is about who copies the bytes, not about who
+owns the goroutine.
+
 ## Un-swapping: not needed, and the reason is better than "not yet"
 
 First, a correction to the premise. The sibling `proxy` repository holds no Go
