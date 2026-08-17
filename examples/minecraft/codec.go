@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	protocol "github.com/go-theft-craft/minecraft-protocol"
-	"github.com/go-theft-craft/minecraft-protocol/protocols"
 
 	"github.com/go-theft-craft/relay"
 )
@@ -16,14 +15,12 @@ import (
 // alternative is importing a generated package and pinning the example to one
 // version of the game.
 const (
-	stateHandshaking = protocol.State("handshaking")
-	stateStatus      = protocol.State("status")
-	stateLogin       = protocol.State("login")
+	stateStatus = protocol.State("status")
+	stateLogin  = protocol.State("login")
 
-	// nextStateStatus and nextStateLogin are the values a handshake carries.
-	// They are protocol constants, not choices this example makes.
+	// nextStateStatus is the value a handshake carries to ask for status. It is
+	// a protocol constant, not a choice this example makes.
 	nextStateStatus int32 = 1
-	nextStateLogin  int32 = 2
 
 	// encryptionResponseID is the serverbound login packet that completes the
 	// key exchange. Every byte after it is enciphered.
@@ -44,12 +41,10 @@ var ErrEncrypted = errors.New("minecraft: the session is encrypted; relaying opa
 // talking to; the clientbound session is built with RoleClient for the mirror
 // reason.
 //
-// Connection state is per direction for the same reason it is per session on a
-// real endpoint: a handshake moves the serverbound decoder into status or
-// login, and the clientbound decoder follows only when the protocol says it
-// should. Advancing both on one packet without thinking about it is the bug
-// this structure exists to prevent — here they do move together, and the state
-// machine below says why in each case.
+// Coding state is per direction for the same reason it is per session on a real
+// endpoint, but the connection state the two share is not this file's to invent:
+// advance asks the protocol what each packet implies and applies the answer to
+// both. See advance for why both.
 //
 // A Codec is called from both read pumps at once, so everything it touches is
 // under one mutex. A protocol.Session is documented as unsafe for concurrent
@@ -163,31 +158,23 @@ func (c *Codec) sessionFor(dir relay.Direction) protocol.Session {
 	return c.toServer
 }
 
-// advance is the state machine, written out rather than hidden in a helper
-// because a reader tracing a bug here will want to see every transition at
-// once. It must be called with mu held.
+// advance moves both decoders in step with the connection. It must be called
+// with mu held.
+//
+// The transitions are the protocol's to decide, not this file's. A session can
+// already report what a packet implies — a handshake selects the next state,
+// and depending on the version a login ends on a clientbound success or on a
+// serverbound acknowledgement through a configuration state that older versions
+// do not have — so asking is both shorter and correct on versions this example
+// was never tested against. Hand-writing the rules here produced a codec that
+// followed the handshake and then silently stopped following anything, which is
+// invisible in a relay and fatal in a capture.
+//
+// Both decoders take every transition, because both describe one connection.
+// The pair exists to track two directions of coding, not two conversations: a
+// login that ends puts both peers in play, and a compression threshold applies
+// to every frame on the link regardless of who sent it.
 func (c *Codec) advance(dir relay.Direction, packet protocol.Packet) {
-	switch {
-	// The handshake is the only packet in the handshaking state, and it names
-	// where the connection goes next. Both decoders move together here, because
-	// the server's very first reply is already in the new state: there is no
-	// clientbound packet in the handshaking state for the client decoder to
-	// still be waiting on.
-	case dir == relay.ToServer && packet.State == stateHandshaking:
-		fields, ok := protocols.ReadHandshake(packet)
-		if !ok {
-			return
-		}
-
-		switch fields.NextState {
-		case nextStateStatus:
-			c.toServer.SetState(stateStatus)
-			c.toClient.SetState(stateStatus)
-		case nextStateLogin:
-			c.toServer.SetState(stateLogin)
-			c.toClient.SetState(stateLogin)
-		}
-
 	// The serverbound encryption response completes the key exchange. It is the
 	// last packet either side sends in the clear, so this one still decoded and
 	// nothing after it will.
@@ -198,7 +185,28 @@ func (c *Codec) advance(dir relay.Direction, packet protocol.Packet) {
 	// stops here on purpose. relay.Transform, which is what a consumer that did
 	// want to do it would reach for, has its own worked example in
 	// examples/cipher.
-	case dir == relay.ToServer && packet.State == stateLogin && packet.ID == encryptionResponseID:
+	//
+	// An offline server never sends the request that provokes this response, so
+	// a capture taken against one — which is what the vanilla-behaviour work
+	// needs — never reaches this line at all.
+	if dir == relay.ToServer && packet.State == stateLogin && packet.ID == encryptionResponseID {
 		c.encrypted = true
+	}
+
+	transition, ok, err := c.sessionFor(dir).ProposeTransition(packet)
+	if err != nil || !ok {
+		// A proposal that errors means the packet does not belong in the state
+		// the session is in. That is worth neither severing the session nor
+		// guessing about: the relay's job is to forward, and the next packet
+		// that does belong will be decoded normally.
+		return
+	}
+
+	for _, session := range []protocol.Session{c.toServer, c.toClient} {
+		if err := session.ValidateTransition(transition); err != nil {
+			continue
+		}
+
+		session.ApplyTransition(transition)
 	}
 }

@@ -3,13 +3,24 @@ package minecraft_test
 import (
 	"bytes"
 	"errors"
+	"reflect"
 	"testing"
 
 	protocol "github.com/go-theft-craft/minecraft-protocol"
+	"github.com/go-theft-craft/minecraft-protocol/generated/java/v1_8"
 	"github.com/go-theft-craft/minecraft-protocol/protocols"
 
 	"github.com/go-theft-craft/relay"
 	"github.com/go-theft-craft/relay/examples/minecraft"
+)
+
+// The packet identities these tests name directly. Login success and set
+// compression carry the same identity in both protocols; the keep-alive is
+// protocol 47's and is only used by the test pinned to it.
+const (
+	loginSuccessID   int32 = 0x02
+	setCompressionID int32 = 0x03
+	v1_8KeepAliveID  int32 = 0x00
 )
 
 func newCodec(t *testing.T) *minecraft.Codec {
@@ -226,6 +237,181 @@ func TestCodecStopsAtEncryption(t *testing.T) {
 			t.Fatalf("Decode %s after the key exchange = %v, want ErrEncrypted", dir, err)
 		}
 	}
+}
+
+// serverPeer is a server-role session that commits its own transitions, which
+// is what makes it a stand-in for a real endpoint rather than an encoder.
+//
+// A real server moves state after it writes login success and starts
+// compressing after it writes set compression. A test peer that skips those
+// steps produces bytes no server would ever send, and a codec that only ever
+// sees those bytes looks correct while being unable to read the real thing.
+type serverPeer struct {
+	t       *testing.T
+	session protocol.Session
+}
+
+func newServerPeer(t *testing.T, descriptor protocol.Protocol, state protocol.State) *serverPeer {
+	t.Helper()
+
+	session, err := descriptor.NewSession(protocol.RoleServer, testLimits(t))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	session.SetState(state)
+
+	return &serverPeer{t: t, session: session}
+}
+
+// send encodes one packet and then commits whatever transition it implies, in
+// that order, because the packet itself crosses under the old settings.
+func (p *serverPeer) send(packet protocol.Packet) []byte {
+	p.t.Helper()
+
+	raw := encodeWith(p.t, p.session, packet)
+
+	transition, ok, err := p.session.ProposeTransition(packet)
+	if err != nil {
+		p.t.Fatalf("ProposeTransition(%s): %v", packet.Name, err)
+	}
+	if ok {
+		p.session.ApplyTransition(transition)
+	}
+
+	return raw
+}
+
+// clientboundPacket builds a packet by identity, leaving its fields zero. These
+// tests care where a packet moves the session, not what it carries.
+func clientboundPacket(t *testing.T, descriptor protocol.Protocol, state protocol.State, id int32) protocol.Packet {
+	t.Helper()
+
+	factory, ok := descriptor.(protocol.PacketFactory)
+	if !ok {
+		t.Skip("this protocol cannot build packet values")
+	}
+
+	value, known := factory.NewPacketValue(state, protocol.DirectionClientbound, id)
+	if !known {
+		t.Skipf("this protocol has no clientbound packet %d in state %q", id, state)
+	}
+
+	return protocol.Packet{
+		State:     state,
+		Direction: protocol.DirectionClientbound,
+		ID:        id,
+		Value:     value,
+	}
+}
+
+// TestCodecFollowsTheLoginIntoPlay is the difference between a relay and an
+// oracle.
+//
+// A codec that stays in the login state is still a working relay — every frame
+// is forwarded — but it decodes nothing after the login, so a capture taken
+// through it holds a whole session of opaque bytes with no packet identities to
+// extract a trace from.
+//
+// It runs on protocol 47 rather than the default, because the packet that ends
+// a login is version-specific: 47 moves to play on the clientbound success,
+// while 775 waits for a serverbound acknowledgement and a configuration state
+// that 47 does not have. That difference is the argument against hand-writing
+// these transitions at all, and 47 is the protocol M9.1 captures.
+func TestCodecFollowsTheLoginIntoPlay(t *testing.T) {
+	descriptor := v1_8.Protocol()
+
+	c, err := minecraft.NewCodec(descriptor, testLimits(t))
+	if err != nil {
+		t.Fatalf("NewCodec: %v", err)
+	}
+
+	handshake, err := protocols.Handshake(descriptor, "example.test", 25565, 2)
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+
+	client, err := descriptor.NewSession(protocol.RoleClient, testLimits(t))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if _, _, err := c.Decode(relay.ToServer, encodeWith(t, client, handshake)); err != nil {
+		t.Fatalf("Decode handshake: %v", err)
+	}
+
+	server := newServerPeer(t, descriptor, protocol.State("login"))
+
+	success := clientboundPacket(t, descriptor, protocol.State("login"), loginSuccessID)
+	if _, _, err := c.Decode(relay.ToClient, server.send(success)); err != nil {
+		t.Fatalf("Decode login success: %v", err)
+	}
+
+	value, desc, err := c.Decode(relay.ToClient, server.send(clientboundPacket(t, descriptor, protocol.State("play"), v1_8KeepAliveID)))
+	if err != nil {
+		t.Fatalf("Decode a play packet after login success: %v — the codec is still in the login state", err)
+	}
+	if desc.Name == "" {
+		t.Fatalf("descriptor = %+v, want a name", desc)
+	}
+
+	packet, ok := value.(protocol.Packet)
+	if !ok {
+		t.Fatalf("Decode returned %T, want protocol.Packet", value)
+	}
+	if packet.State != protocol.State("play") {
+		t.Fatalf("packet state = %q, want play", packet.State)
+	}
+}
+
+// TestCodecFollowsSetCompression covers the other half of the same gap, and
+// this half is version-neutral: both protocols set compression with the same
+// clientbound login packet.
+//
+// A vanilla server compresses at a threshold of 256 by default, and the
+// envelope sits inside the frame the framer hands over. A codec that has not
+// applied the control reads the compressed body as a packet ID, from the first
+// packet after the login rather than from any visible boundary.
+func TestCodecFollowsSetCompression(t *testing.T) {
+	descriptor := protocols.Default()
+	c := newCodec(t)
+
+	if _, _, err := c.Decode(relay.ToServer, handshakeBytes(t, 2)); err != nil {
+		t.Fatalf("Decode handshake: %v", err)
+	}
+
+	server := newServerPeer(t, descriptor, protocol.State("login"))
+
+	// A threshold of zero compresses everything, so the next frame is
+	// unambiguously enveloped. Vanilla's 256 would leave small packets
+	// uncompressed and let an unapplied control pass by luck.
+	compress := clientboundPacket(t, descriptor, protocol.State("login"), setCompressionID)
+	setThreshold(t, compress, 0)
+
+	if _, _, err := c.Decode(relay.ToClient, server.send(compress)); err != nil {
+		t.Fatalf("Decode set compression: %v", err)
+	}
+
+	// Vanilla's order: set compression, then success, which is the first packet
+	// to cross under the new setting.
+	success := clientboundPacket(t, descriptor, protocol.State("login"), loginSuccessID)
+	if _, desc, err := c.Decode(relay.ToClient, server.send(success)); err != nil {
+		t.Fatalf("Decode login success under compression: %v — the codec did not apply the control", err)
+	} else if desc.Name == "" {
+		t.Fatalf("descriptor = %+v, want a name", desc)
+	}
+}
+
+// setThreshold fills the one field these tests care about, by reflection,
+// because the field lives on a generated type this version-neutral example does
+// not otherwise import.
+func setThreshold(t *testing.T, packet protocol.Packet, threshold int32) {
+	t.Helper()
+
+	field := reflect.ValueOf(packet.Value).Elem().FieldByName("Threshold")
+	if !field.IsValid() || !field.CanSet() {
+		t.Skipf("packet %d in state %q has no settable Threshold field", packet.ID, packet.State)
+	}
+
+	field.SetInt(int64(threshold))
 }
 
 // encryptionResponseBytes builds the serverbound packet that completes the key

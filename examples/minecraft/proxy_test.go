@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,10 +18,13 @@ import (
 	_ "modernc.org/sqlite"
 
 	protocol "github.com/go-theft-craft/minecraft-protocol"
+	capturepkg "github.com/go-theft-craft/minecraft-protocol/capture"
 	"github.com/go-theft-craft/minecraft-protocol/protocols"
+	"github.com/go-theft-craft/minecraft-protocol/wire/java"
 
 	"github.com/go-theft-craft/relay"
 	"github.com/go-theft-craft/relay/examples/minecraft"
+	capturesink "github.com/go-theft-craft/relay/examples/minecraft/capture"
 	"github.com/go-theft-craft/relay/examples/minecraft/store"
 )
 
@@ -273,6 +277,15 @@ func runExampleProxy(t *testing.T, upstream string, hooks ...relay.Hook) (addr s
 func runExampleProxyWith(t *testing.T, upstream string, capture bool, hooks ...relay.Hook) (addr string, sink *store.SQLite, dbPath string, idle func()) {
 	t.Helper()
 
+	return runExampleProxyRecording(t, upstream, capture, nil, hooks...)
+}
+
+// runExampleProxyRecording adds a second sink alongside the store, which is how
+// the command runs when it is asked to record: one connection, two things
+// watching it.
+func runExampleProxyRecording(t *testing.T, upstream string, capture bool, extra relay.Sink, hooks ...relay.Hook) (addr string, sink *store.SQLite, dbPath string, idle func()) {
+	t.Helper()
+
 	descriptor := protocols.Default()
 
 	limits, err := protocol.NewLimits()
@@ -292,6 +305,11 @@ func runExampleProxyWith(t *testing.T, upstream string, capture bool, hooks ...r
 		t.Fatalf("store.Open: %v", err)
 	}
 
+	sinks := relay.Sink(sink)
+	if extra != nil {
+		sinks = minecraft.NewMultiSink(sink, extra)
+	}
+
 	p, err := relay.New(relay.Config{
 		Ports:  []relay.PortConfig{{Port: 0, Upstreams: []relay.Upstream{{Addr: upstream}}}},
 		Framer: framer,
@@ -299,7 +317,7 @@ func runExampleProxyWith(t *testing.T, upstream string, capture bool, hooks ...r
 			return minecraft.NewCodec(descriptor, limits)
 		},
 		Prober:     minecraft.Prober{Descriptor: descriptor, Timeout: 5 * time.Second},
-		Sink:       sink,
+		Sink:       sinks,
 		Hooks:      hooks,
 		CaptureRaw: capture,
 	})
@@ -565,5 +583,89 @@ func TestEndToEndRawCapture(t *testing.T) {
 	}
 	if orphans != 0 {
 		t.Fatalf("%d raw chunks are not attached to any session", orphans)
+	}
+}
+
+// TestEndToEndRecording is the evidence that the capture sink works where it
+// will actually be used: through a real exchange, on a real connection, rather
+// than against hand-built records.
+//
+// It asserts on packet identities, not on byte counts. A recording that holds
+// the right number of unidentifiable frames is exactly the failure the codec
+// work before it was meant to close.
+func TestEndToEndRecording(t *testing.T) {
+	up := newStubServer(t)
+	dir := t.TempDir()
+
+	limits, err := protocol.NewLimits()
+	if err != nil {
+		t.Fatalf("NewLimits: %v", err)
+	}
+
+	inner, err := java.NewFramer(limits)
+	if err != nil {
+		t.Fatalf("NewFramer: %v", err)
+	}
+
+	recorder, err := capturesink.NewRecorder(capturesink.Options{
+		Dir:        dir,
+		Descriptor: protocols.Default(),
+		Limits:     limits,
+		Framer:     inner,
+		OnError:    func(err error) { t.Errorf("recorder reported: %v", err) },
+	})
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+
+	addr, _, _, idle := runExampleProxyRecording(t, up.addr(), false, recorder)
+
+	if got := statusClient(t, addr); !strings.Contains(got, "the stub upstream") {
+		t.Fatalf("the client was answered with %q, want the stub's document", got)
+	}
+
+	idle()
+
+	matches, err := filepath.Glob(filepath.Join(dir, "*.mccap"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("the exchange produced %d recordings, want 1", len(matches))
+	}
+
+	file, err := os.Open(matches[0])
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	reader, err := capturepkg.NewReader(file)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+
+	var names []string
+	for {
+		record, err := reader.Next()
+		if err != nil {
+			break
+		}
+		if record.Kind == capturepkg.KindPacket {
+			names = append(names, record.Name)
+		}
+	}
+
+	if !reader.Complete() {
+		t.Error("the recording has no trailer; the session did not close it")
+	}
+	if len(names) < 3 {
+		t.Fatalf("recorded packets %v, want at least the handshake, the request, and the response", names)
+	}
+
+	for _, name := range names {
+		if name == "" {
+			t.Errorf("recorded packets %v include an unidentified one", names)
+		}
 	}
 }

@@ -59,42 +59,77 @@ corrupting the stream.
 | `Hook()` | the hook that installs the keystreams |
 | `New(port, upstream)` | a runnable proxy |
 
-## `minecraft` — the seam against a real protocol
-
-**In progress.** The framer and the codec are written; the prober, the sink, the
-runnable proxy, and the tests are not. Do not read this as finished work yet.
+## `minecraft` — the seam against a real protocol, and the capture oracle
 
 This is where the seam gets tested against a protocol that was not designed for
 it, which is the only way to find out whether the seams are real. It builds on
 [`minecraft-protocol`](https://github.com/go-theft-craft/minecraft-protocol).
 
-- `Framer` adapts the Java edition frame envelope. A relay message is one frame
-  payload: the length prefix is framing and belongs here, everything inside it
-  is the codec's problem. It copies the payload, because `Frame.Payload` returns
-  a borrowed view and `relay.Framer` promises the caller a slice it will not
-  reuse.
-- `Codec` holds **two** protocol sessions, not one. A `protocol.Session` fixes
-  its inbound direction from the role it was built with, and a proxy reads both
-  directions, so a single session could only ever decode half the traffic.
-  Connection state is per direction for the same reason it is per session on a
-  real endpoint.
+It is also the capture tool the gameplay-verification work depends on: put it in
+front of a vanilla server and it records what vanilla did, in a format that
+replays. Recording belongs to a proxy rather than to either endpoint, because an
+endpoint only ever sees its own half — and one of the endpoints is the thing
+being judged.
 
-**Decoding stops at encryption.** Once a session completes its key exchange the
-codec returns `ErrEncrypted` and the relay falls back to opaque passthrough.
+| Package | What it is |
+| --- | --- |
+| `Framer` | `relay.Framer` over the Java frame envelope |
+| `Codec` | two protocol sessions, one per direction, following the protocol's own transitions |
+| `Prober` | health that means the server answered a status ping |
+| `MultiSink` | fans one session out to several sinks |
+| `capture/` | a `relay.Sink` writing one replayable `.mccap` per session |
+| `trace/` | per-entity trajectories extracted from a recording |
+| `replaycheck/` | the gate: does a recording reproduce itself |
+| `store/` | an async batched SQLite sink |
+| `cmd/mcrelay` | the runnable proxy, plus `trace` and `verify` |
+
+```
+mcrelay -upstream 127.0.0.1:25565 -record ./recordings   # relay and record
+mcrelay verify ./recordings/*.mccap                      # does it replay?
+mcrelay trace -in ./recordings/session.mccap -out t.json  # trajectories
+```
+
+### What the parts are for
+
+- **`Framer`** adapts the Java edition frame envelope. A relay message is one
+  frame payload: the length prefix is framing and belongs here, everything
+  inside it is the codec's problem. It copies the payload, because
+  `Frame.Payload` returns a borrowed view and `relay.Framer` promises the caller
+  a slice it will not reuse.
+- **`Codec`** holds **two** protocol sessions, not one. A `protocol.Session`
+  fixes its inbound direction from the role it was built with, and a proxy reads
+  both directions, so a single session could only ever decode half the traffic.
+  It does not hand-write its state machine: it asks the protocol what each
+  packet implies and applies the answer to both decoders. The triggers are
+  version-specific — protocol 47 moves to play on the clientbound login success,
+  while 775 waits for a serverbound acknowledgement through a configuration
+  state 47 does not have — so hand-writing them is a standing bug rather than a
+  shortcut.
+- **`capture`** records every relayed frame as a raw record, and every frame
+  that decoded as a packet record besides. That is the pair a real endpoint's
+  stream emits. It records what it cannot parse, and it withholds the key
+  exchange: the fix `minecraft-protocol` made inside its own stream does not
+  come along for free when a proxy assembles observations by hand, so the sink
+  asks the protocol which frames carry secret material.
+- **`trace`** accumulates relative moves onto the last absolute position, so a
+  consumer gets positions rather than deltas. A move for an entity that never
+  spawned is an error, not a trace starting at the origin. It reads both
+  directions, because the connecting player's own trajectory is in neither the
+  spawn packets nor the server's movement packets — a server does not spawn a
+  client to itself, and after its opening teleport the client reports where it
+  walked rather than being told. Protocol 47 only:
+  the packets, their fixed-point scales, and the spawn set are all
+  version-specific, and decoding 775 with 47's rules would produce plausible
+  numbers that are wrong.
+- **`replaycheck`** replays a recording and compares the digest with the one the
+  file's own trailer carries. A recording that does not reproduce itself is not
+  evidence.
+
+**Decoding still stops at encryption.** Once a session completes a key exchange
+the codec returns `ErrEncrypted` and the relay falls back to opaque passthrough.
 Standing between an encrypted login as a third party means running two key
-exchanges and holding the client's session credentials, which is a project in
-itself and teaches nothing about the framework seam. A consumer that did want to
-do it would reach for `relay.Transform`, which is what `cipher` above
-demonstrates.
-
-### Still to build
-
-- `prober.go` — a `relay.Prober` that performs a real status ping, so "healthy"
-  means the server answered rather than that something holds the port open.
-- `store/` — an async batched SQLite sink. It is a package rather than a file
-  because several hundred lines of SQL and batching beside the framer would bury
-  what a reader came for.
-- `main.go` — flags, wiring, and a graceful stop.
-- `framer_test.go`, `codec_test.go`, `proxy_test.go` — including
-  `relaytest.FramerContract` against the real length-prefixed framer, which is
-  the first time that harness meets anything other than a newline.
+exchanges and holding the client's session credentials. Capture does not need
+it: vanilla only exchanges keys in online mode, and an oracle wants a server
+whose behaviour is vanilla rather than one whose accounts are verified. A
+consumer that did want to do it would reach for `relay.Transform`, which is what
+`cipher` above demonstrates.

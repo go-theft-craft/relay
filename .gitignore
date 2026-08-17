@@ -1,3 +1,7 @@
 coverage.out
 .devbox/
 .task/
+
+# Recordings hold player UUIDs, usernames, and chat. Local runtime data only.
+/recordings/
+*.mccap

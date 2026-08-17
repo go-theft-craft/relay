@@ -10,9 +10,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -22,30 +24,75 @@ import (
 
 	protocol "github.com/go-theft-craft/minecraft-protocol"
 	"github.com/go-theft-craft/minecraft-protocol/protocols"
+	"github.com/go-theft-craft/minecraft-protocol/wire/java"
 
 	"github.com/go-theft-craft/relay"
 	"github.com/go-theft-craft/relay/examples/minecraft"
+	capturesink "github.com/go-theft-craft/relay/examples/minecraft/capture"
+	"github.com/go-theft-craft/relay/examples/minecraft/replaycheck"
 	"github.com/go-theft-craft/relay/examples/minecraft/store"
+	"github.com/go-theft-craft/relay/examples/minecraft/trace"
 )
 
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "mcrelay: %v\n", err)
-		os.Exit(1)
+func main() { os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr)) }
+
+// dispatch routes the two offline subcommands and otherwise runs the proxy.
+//
+// It returns an exit code rather than an error because that is what the caller
+// needs and what a test can assert on: `verify` exits non-zero on a recording
+// that will not replay, which is how it is used from CI and from an agent.
+func dispatch(args []string, stdout, stderr io.Writer) int {
+	var err error
+
+	switch {
+	case len(args) > 0 && args[0] == "trace":
+		err = runTrace(args[1:], stdout)
+	case len(args) > 0 && args[0] == "verify":
+		err = runVerify(args[1:], stdout)
+	default:
+		err = run(args)
 	}
+
+	// Asking for help is not a failure. Every flag set here parses with
+	// ContinueOnError, which has already printed the usage text by the time it
+	// returns ErrHelp; reporting it again as an error would tell a reader who
+	// typed -h that something went wrong, and exit non-zero at a caller that
+	// checks.
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+
+	if err != nil {
+		fmt.Fprintf(stderr, "mcrelay: %v\n", err)
+
+		return 1
+	}
+
+	return 0
 }
 
-func run() error {
+func run(args []string) error {
+	flags := flag.NewFlagSet("mcrelay", flag.ContinueOnError)
+
 	var (
-		listen    = flag.String("listen", "25565", "comma-separated ports to listen on; 0 binds an ephemeral port")
-		upstreams = flag.String("upstream", "", "comma-separated upstream addresses as host:port")
-		version   = flag.String("protocol", protocols.Default().ID(), "protocol ID to speak")
-		dbPath    = flag.String("db", "relay.db", "SQLite database to record to")
-		logLevel  = flag.String("log", "info", "log level: debug, info, warn, error")
-		drain     = flag.Duration("drain", 5*time.Second, "how long a closing session may finish an in-flight write")
-		capture   = flag.Bool("capture", false, "record every raw byte of the client connection, not just decoded messages")
+		listen    = flags.String("listen", "25565", "comma-separated ports to listen on; 0 binds an ephemeral port")
+		upstreams = flags.String("upstream", "", "comma-separated upstream addresses as host:port")
+		version   = flags.String("protocol", protocols.Default().ID(), "protocol ID to speak")
+		dbPath    = flags.String("db", "relay.db", "SQLite database to record to")
+		logLevel  = flags.String("log", "info", "log level: debug, info, warn, error")
+		drain     = flags.Duration("drain", 5*time.Second, "how long a closing session may finish an in-flight write")
+		capture   = flags.Bool("capture", false, "record every raw byte of the client connection, not just decoded messages")
+		record    = flags.String("record", "", "directory to write one replayable .mccap recording per session into")
 	)
-	flag.Parse()
+
+	flags.Usage = func() {
+		fmt.Fprint(flags.Output(), relayUsage)
+		flags.PrintDefaults()
+	}
+
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 
 	logger, err := newLogger(*logLevel)
 	if err != nil {
@@ -89,6 +136,32 @@ func run() error {
 	}
 	defer func() { _ = sink.Close() }()
 
+	// Recording composes with the store rather than replacing it, which is the
+	// point of a Sink being an interface: one connection, two things watching
+	// it, neither aware of the other.
+	sinks := relay.Sink(sink)
+	if *record != "" {
+		inner, err := java.NewFramer(limits)
+		if err != nil {
+			return fmt.Errorf("recording framer: %w", err)
+		}
+
+		recorder, err := capturesink.NewRecorder(capturesink.Options{
+			Dir:        *record,
+			Descriptor: descriptor,
+			Limits:     limits,
+			Framer:     inner,
+			OnError: func(err error) {
+				logger.Error("recording", slog.Any("err", err))
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		sinks = minecraft.NewMultiSink(sink, recorder)
+	}
+
 	portConfigs := make([]relay.PortConfig, 0, len(ports))
 	for _, port := range ports {
 		portConfigs = append(portConfigs, relay.PortConfig{Port: port, Upstreams: candidates})
@@ -107,7 +180,7 @@ func run() error {
 		// Health that means the server answered, rather than that something
 		// holds the port open.
 		Prober:   minecraft.Prober{Descriptor: descriptor, Timeout: 3 * time.Second},
-		Sink:     sink,
+		Sink:     sinks,
 		Selector: relay.FirstHealthy(),
 		// Off by default: it costs a copy per socket read and write, and stores
 		// the whole conversation rather than a row per message.
@@ -128,6 +201,7 @@ func run() error {
 		slog.Any("ports", ports),
 		slog.String("protocol", descriptor.ID()),
 		slog.String("db", *dbPath),
+		slog.String("recordings", *record),
 	)
 
 	if err := proxy.Run(ctx); err != nil {
@@ -217,4 +291,138 @@ func parseUpstreams(list string) ([]relay.Upstream, error) {
 	}
 
 	return out, nil
+}
+
+// The usage text each mode prints. It is written out rather than generated,
+// because the thing a reader needs first is what the three modes are for, and
+// no flag list says that.
+const (
+	relayUsage = `mcrelay relays Minecraft connections and records what crosses.
+
+Usage:
+  mcrelay -upstream <host:port> [-listen <ports>] [-record <dir>]
+  mcrelay trace  -in <file.mccap> [-out <file.json>]
+  mcrelay verify <file.mccap>...
+
+Flags:
+`
+
+	traceUsage = `mcrelay trace extracts per-entity trajectories from a recording.
+
+Usage:
+  mcrelay trace -in <file.mccap> [-out <file.json>]
+
+The protocol comes from the recording's own header. Output is JSON on stdout
+unless -out names a file.
+
+Flags:
+`
+
+	verifyUsage = `mcrelay verify replays recordings and reports whether they reproduce themselves.
+
+Usage:
+  mcrelay verify <file.mccap>...
+
+Exits non-zero if any recording fails, so it can gate a capture session before
+the traces are trusted.
+`
+)
+
+// runTrace extracts trajectories from one recording.
+func runTrace(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("trace", flag.ContinueOnError)
+	in := flags.String("in", "", "recording to read")
+	out := flags.String("out", "", "file to write JSON to; stdout when empty")
+
+	flags.Usage = func() {
+		fmt.Fprint(flags.Output(), traceUsage)
+		flags.PrintDefaults()
+	}
+
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" {
+		return errors.New("trace: -in is required")
+	}
+
+	traces, header, err := trace.ExtractFile(*in)
+	if err != nil {
+		return err
+	}
+
+	document := traceDocument{
+		Recording: *in,
+		Protocol:  header.Protocol,
+		Note:      header.Note,
+		Traces:    traces,
+	}
+
+	encoded, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return fmt.Errorf("trace: encode: %w", err)
+	}
+	encoded = append(encoded, '\n')
+
+	if *out == "" {
+		_, err = stdout.Write(encoded)
+
+		return err
+	}
+
+	if err := os.WriteFile(*out, encoded, 0o600); err != nil {
+		return fmt.Errorf("trace: write %s: %w", *out, err)
+	}
+
+	return nil
+}
+
+// traceDocument is what `trace` writes. It names the recording and the protocol
+// alongside the traces, because a trajectory file that cannot say where it came
+// from is not much use six months later.
+type traceDocument struct {
+	Recording string        `json:"recording"`
+	Protocol  string        `json:"protocol"`
+	Note      string        `json:"note,omitempty"`
+	Traces    []trace.Trace `json:"traces"`
+}
+
+// runVerify is M9.1's gate at the command line.
+func runVerify(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("verify", flag.ContinueOnError)
+	flags.Usage = func() { fmt.Fprint(flags.Output(), verifyUsage) }
+
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	paths := flags.Args()
+	if len(paths) == 0 {
+		return errors.New("verify: name at least one recording")
+	}
+
+	var failed int
+	for _, path := range paths {
+		result, err := replaycheck.Check(context.Background(), path)
+		if err != nil {
+			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, err)
+			failed++
+
+			continue
+		}
+
+		status := "ok"
+		if !result.OK() {
+			status = "FAIL"
+			failed++
+		}
+
+		fmt.Fprintf(stdout, "%s %s: %d records, %s\n", status, path, result.Records, result.Explain())
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d of %d recordings did not replay", failed, len(paths))
+	}
+
+	return nil
 }
