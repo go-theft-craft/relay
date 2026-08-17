@@ -273,6 +273,36 @@ disagreement.
 That settles what step 7 was for: recording a session against our own server
 needs no code in that server, so its packet log never has to grow.
 
+### Where the recordings are
+
+Not in this repository, and they must not be put here. `.gitignore` excludes
+`*.mccap` because a recording holds player UUIDs, usernames, and chat, and every
+file above is a real session played by a real account.
+
+They are at `../oracle-evidence/2026-08-17-relay-capture/`, alongside a `README`
+saying what each one demonstrates, a `SHA256SUMS` over all of them, the two
+scripted clients, both server logs, and the `mcrelay` binary built from `83bfe15`
+that the verdicts were taken with. Digests of the files this document names:
+
+```
+79d88e5faa6dbff8  recordings/20260817-125838-002.mccap  the defect
+53700ff62da7ed1e  recordings/20260817-130234-003.mccap  the defect, third-party client
+4c28f8ed9121af14  recordings/20260817-130323-004.mccap  control arm, compression off
+5eb4478279b1422a  recordings/20260817-130923-005.mccap  the dropped item
+a161df901889c8de  recordings/20260817-131254-007.mccap  the first real arrow
+4d11607a65349027  fixed/20260817-132050-001.mccap       the fix on the wire
+90f0bfa0091c17bb  fixed/20260817-132217-003.mccap       real client, compressed, fixed
+7236f03c8c9fa679  ourserver/20260817-133017-001.mccap   step 7
+```
+
+Every verdict in this document was re-run against those files in that location
+after they were moved there, and each reproduced — including both failures.
+
 ### Still open
 
 Nothing from the procedure. Every step has a result above.
+
+One thing worth stating plainly about what this evidence cannot outlive: the two
+failing recordings are the only artifacts of the defect, and a capture taken
+before the fix cannot be repaired. If they are lost, the defect becomes a claim
+in a document rather than something anybody can re-run.
