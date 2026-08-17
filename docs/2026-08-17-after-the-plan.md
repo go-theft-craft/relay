@@ -130,6 +130,16 @@ a keystream, which cannot be reversed mid-connection because it does not restart
 That is a structural answer rather than a survey result: **un-swapping is not
 needed, and the design already routes the reversible case somewhere it is free.**
 
+When this was written the disable path had never run here, so the claim rested on
+reading `compressionForThreshold` and `conduit.go:18`. It runs now.
+`codec_test.go` takes a threshold from 0 up to 256 and then to −1, through
+protocol 47's play-state set compression, asserting after each change that a
+packet decodes as itself rather than merely without error. `login_test.go` drives
+the same two changes through the proxy into a recording and puts each recording
+through the replay gate, and a companion test corrupts a recorded threshold to
+show the gate can refuse. The conclusion is unchanged; what backs it is no longer
+"the code says".
+
 The thing worth keeping: if a protocol ever does hand a layer back, the hard part
 is not `Transform`. It is the guard `0.2.1` added — a swap that changes the read
 side is refused while buffered bytes from before the boundary remain — because a

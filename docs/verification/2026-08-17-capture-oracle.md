@@ -22,6 +22,35 @@ M8.1 used for its transcribed constants, and the same one `minecraft-protocol`
 M4 hit when a defect invisible to every automated test showed up against a
 vanilla client.
 
+## What the stub covers, and what it does not
+
+The argument above is unchanged, but the line has moved since this procedure was
+first run, and somebody about to spend an evening with a Minecraft client should
+know where it now sits.
+
+Compression is regression-checked end to end. `examples/minecraft/login_test.go`
+drives a stub login through the proxy at four threshold scripts — vanilla's 256,
+1, a change from 1 up to 256 after the join, and a change from 256 to −1 that
+turns compression off mid-session — and runs each recording through the same
+`replaycheck` gate step 5 below runs. `codec_test.go` covers the same three
+transitions one layer down, asserting the identity of the packet that came back
+rather than the absence of an error, because a frame read under the wrong
+envelope can decode cleanly into the wrong packet. The gate's own negative case
+is covered too: a recording rewritten with its last threshold flipped from
+disabled back to enabled is refused, which is what says the passes above mean
+something.
+
+So steps 5 and 6 against a compressed session are now a confirmation rather than
+a discovery, in both directions of the threshold.
+
+**Encryption is the honest remainder.** No stub here runs a key exchange, and
+none can without the proxy holding the client's session credentials — which
+`codec.go` declines on purpose. An online-mode login puts the codec into
+`ErrEncrypted` and everything after it into the recording as opaque frames, and
+nothing in this repository has ever watched that happen. That path, and the
+shared-misunderstanding problem the section above describes, are what a person
+with a real client is still holding one for.
+
 ## What to run
 
 Requirements: a pinned vanilla 1.8.9 server with `online-mode=false`, a real
@@ -229,8 +258,12 @@ configuration that had failed an hour earlier:
   (-73.7, 67, 226.5), which is the position the client itself reported as its
   last. Ground truth and extraction agree to the last digit.
 
-A unit test pins the ordering: it asserts the set compression record keeps its
-body, and it fails if the two calls are swapped back.
+A unit test pins the ordering: it asserts every threshold-carrying frame keeps
+its body — the raw record as well as the packet record, since a replay reads the
+first and the two are withheld together — and it fails if the two calls are
+swapped back. It asks that of the changes made in play as well as the one made
+during the login, because the last threshold in a session is the one that
+decides the envelope every later frame wears.
 
 ### The second defect, and why counting decodes could not close it
 

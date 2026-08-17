@@ -15,12 +15,18 @@ import (
 )
 
 // The packet identities these tests name directly. Login success and set
-// compression carry the same identity in both protocols; the keep-alive is
-// protocol 47's and is only used by the test pinned to it.
+// compression carry the same identity in both protocols; the rest are protocol
+// 47's and are only used by the tests pinned to it.
 const (
 	loginSuccessID   int32 = 0x02
 	setCompressionID int32 = 0x03
 	v1_8KeepAliveID  int32 = 0x00
+	v1_8PositionID   int32 = 0x08
+	// v1_8SetCompressionID is set compression in the play state, where a
+	// threshold that changes after the login arrives. It is a different branch
+	// of the protocol's transition table from the login packet above, and it is
+	// 47's alone: the default protocol has no play-state set compression.
+	v1_8SetCompressionID int32 = 0x46
 )
 
 func newCodec(t *testing.T) *minecraft.Codec {
@@ -370,6 +376,9 @@ func TestCodecFollowsTheLoginIntoPlay(t *testing.T) {
 // envelope sits inside the frame the framer hands over. A codec that has not
 // applied the control reads the compressed body as a packet ID, from the first
 // packet after the login rather than from any visible boundary.
+//
+// It covers the threshold arriving once. The test below covers it changing,
+// which is 47's alone and so cannot live here.
 func TestCodecFollowsSetCompression(t *testing.T) {
 	descriptor := protocols.Default()
 	c := newCodec(t)
@@ -397,6 +406,126 @@ func TestCodecFollowsSetCompression(t *testing.T) {
 		t.Fatalf("Decode login success under compression: %v — the codec did not apply the control", err)
 	} else if desc.Name == "" {
 		t.Fatalf("descriptor = %+v, want a name", desc)
+	}
+}
+
+// TestCodecFollowsAThresholdThatChanges is the half of compression that had
+// never run here.
+//
+// Compression is the one negotiated setting in this protocol family that is
+// reversible. A threshold arrives again in play, and a negative one turns
+// compression off behind the very frame that carries it — which travels
+// compressed, the mirror image of the frame that turns compression on and
+// travels in the clear. Every conclusion in this tree about the disable path
+// rests on that ordering, and reading the code is not running it.
+//
+// It is pinned to protocol 47 because the play-state set compression packet is
+// 47's; the version-neutral half stays in the test above.
+func TestCodecFollowsAThresholdThatChanges(t *testing.T) {
+	descriptor := v1_8.Protocol()
+
+	c, err := minecraft.NewCodec(descriptor, testLimits(t))
+	if err != nil {
+		t.Fatalf("NewCodec: %v", err)
+	}
+
+	client, err := descriptor.NewSession(protocol.RoleClient, testLimits(t))
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	handshake, err := protocols.Handshake(descriptor, "example.test", 25565, 2)
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+
+	if _, _, err := c.Decode(relay.ToServer, encodeWith(t, client, handshake)); err != nil {
+		t.Fatalf("Decode handshake: %v", err)
+	}
+
+	server := newServerPeer(t, descriptor, protocol.State("login"))
+
+	// Enable at zero, so every frame after this one is genuinely deflated
+	// rather than passing by luck.
+	compress := clientboundPacket(t, descriptor, protocol.State("login"), setCompressionID)
+	setThreshold(t, compress, 0)
+
+	if _, _, err := c.Decode(relay.ToClient, server.send(compress)); err != nil {
+		t.Fatalf("Decode set compression: %v", err)
+	}
+
+	// Login success is the first frame under the new envelope, and it is what
+	// puts both halves in play, where every later change arrives.
+	success := clientboundPacket(t, descriptor, protocol.State("login"), loginSuccessID)
+	if _, _, err := c.Decode(relay.ToClient, server.send(success)); err != nil {
+		t.Fatalf("Decode login success under compression: %v — the codec did not apply the control", err)
+	}
+
+	assertAPlayPacketDecodesAsItself(t, c, server, "enabled at threshold 0")
+
+	for _, change := range []struct {
+		name      string
+		threshold int32
+	}{
+		{"re-enabled at vanilla's default", 256},
+		{"disabled", -1},
+	} {
+		next := clientboundPacket(t, descriptor, protocol.State("play"), v1_8SetCompressionID)
+		setThreshold(t, next, change.threshold)
+
+		if _, _, err := c.Decode(relay.ToClient, server.send(next)); err != nil {
+			t.Fatalf("Decode set compression, %s: %v", change.name, err)
+		}
+
+		assertAPlayPacketDecodesAsItself(t, c, server, change.name)
+	}
+}
+
+// assertAPlayPacketDecodesAsItself sends one play packet under whatever
+// envelope is currently in force and insists the codec read that packet rather
+// than some other one.
+//
+// The position is the probe because it has a non-zero ID and a body, so a
+// misread moves the identity as well as the fields. A stale threshold makes
+// this loud — the codec either refuses an uncompressed body it expected to be
+// deflated, or tries to inflate a raw one — and both are caught by the error
+// check alone.
+//
+// The identity check is here for the quiet failure, which is the one the live
+// procedure actually found: a codec that believes compression is off reads the
+// zero-length data prefix of an uncompressed frame as a packet ID and returns a
+// perfectly valid packet of the wrong identity, with no error at all. Nothing
+// in this test provokes that, and asserting only "no error" is what would let
+// it through if something later did.
+func assertAPlayPacketDecodesAsItself(t *testing.T, c *minecraft.Codec, server *serverPeer, stage string) {
+	t.Helper()
+
+	const x = 8.5
+
+	value, desc, err := c.Decode(relay.ToClient, server.send(protocol.Packet{
+		State:     protocol.State("play"),
+		Direction: protocol.DirectionClientbound,
+		ID:        v1_8PositionID,
+		Value:     &v1_8.PlayClientboundPosition{X: x, Y: 65, Z: -4.5},
+	}))
+	if err != nil {
+		t.Fatalf("%s: decode a play packet: %v — the codec is reading the wrong envelope", stage, err)
+	}
+	if desc.ID != v1_8PositionID {
+		t.Fatalf("%s: decoded packet %d, want %d — the frame was read under the wrong envelope", stage, desc.ID, v1_8PositionID)
+	}
+
+	packet, ok := value.(protocol.Packet)
+	if !ok {
+		t.Fatalf("%s: Decode returned %T, want protocol.Packet", stage, value)
+	}
+
+	position, ok := packet.Value.(*v1_8.PlayClientboundPosition)
+	if !ok {
+		t.Fatalf("%s: decoded a %T, want a position", stage, packet.Value)
+	}
+	if position.X != x {
+		t.Fatalf("%s: position X = %v, want %v", stage, position.X, x)
 	}
 }
 
