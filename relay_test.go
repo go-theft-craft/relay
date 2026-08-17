@@ -75,6 +75,73 @@ func (u *echoUpstream) connections() int {
 	return u.accepted
 }
 
+// scriptedUpstream reads one newline-terminated request and answers with a
+// fixed reply, which lets a test give the two directions different framing.
+type scriptedUpstream struct {
+	ln net.Listener
+}
+
+func newScriptedUpstream(t *testing.T, _, reply string) *scriptedUpstream {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				defer func() { _ = conn.Close() }()
+
+				if _, err := bufio.NewReader(conn).ReadString('\n'); err != nil {
+					return
+				}
+
+				_, _ = conn.Write([]byte(reply))
+			}()
+		}
+	}()
+
+	return &scriptedUpstream{ln: ln}
+}
+
+func (u *scriptedUpstream) addr() string { return u.ln.Addr().String() }
+
+// delimFramer frames on an arbitrary byte, so a test can hand the two
+// directions framers that disagree about where a message ends.
+type delimFramer struct {
+	delim byte
+}
+
+func (f delimFramer) ReadMessage(r Reader) ([]byte, error) {
+	var msg []byte
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		if b == f.delim {
+			return msg, nil
+		}
+
+		msg = append(msg, b)
+	}
+}
+
+func (f delimFramer) WriteMessage(w io.Writer, raw []byte) error {
+	_, err := w.Write(append(append([]byte(nil), raw...), f.delim))
+
+	return err
+}
+
 // deadAddr returns an address nothing is listening on, by binding one and
 // closing it again.
 func deadAddr(t *testing.T) string {
@@ -98,7 +165,7 @@ func deadAddr(t *testing.T) string {
 func runProxy(t *testing.T, cfg Config) (proxy *Proxy, wait func(*testing.T) error, sessionErrors chan error) {
 	t.Helper()
 
-	if cfg.Framer == nil {
+	if cfg.Framer == nil && cfg.NewFramer == nil {
 		cfg.Framer = lineFramer{}
 	}
 
@@ -622,6 +689,135 @@ func TestProxyReportsACodecThatCannotBeBuilt(t *testing.T) {
 	}
 	if n := up.connections(); n != 0 {
 		t.Fatalf("the upstream saw %d connections, want none — setup failed before the dial", n)
+	}
+}
+
+// TestProxyBuildsAFramerPerSessionAndDirection covers the case NewFramer exists
+// for: a protocol whose boundaries are found by decoding, so the framer carries
+// per-connection state and reads the two directions differently. The upstream
+// framer here uppercases nothing and the client one does, which is only
+// observable if the two are genuinely separate instances.
+func TestProxyBuildsAFramerPerSessionAndDirection(t *testing.T) {
+	up := newEchoUpstream(t)
+
+	var mu sync.Mutex
+	built := make([]Direction, 0, 6)
+
+	p, _, _ := runProxy(t, Config{
+		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		NewFramer: func(dir Direction) (Framer, error) {
+			mu.Lock()
+			built = append(built, dir)
+			mu.Unlock()
+
+			return lineFramer{}, nil
+		},
+	})
+
+	addr := onlyAddr(t, p)
+
+	for range 3 {
+		conn := dial(t, addr)
+		writeLine(t, conn, "hello")
+
+		if got := readLine(t, bufio.NewReader(conn)); got != "hello" {
+			t.Fatalf("got %q, want hello", got)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(built) != 6 {
+		t.Fatalf("NewFramer ran %d times for 3 sessions, want 6 — one per direction", len(built))
+	}
+
+	var toServer, toClient int
+	for _, dir := range built {
+		if dir == ToServer {
+			toServer++
+		} else {
+			toClient++
+		}
+	}
+
+	if toServer != 3 || toClient != 3 {
+		t.Fatalf("built %d ToServer and %d ToClient framers, want 3 each", toServer, toClient)
+	}
+}
+
+// TestProxyFramerPerDirectionFramesEachWayItsOwnWay is the property NewFramer
+// buys over Framer: the two directions can disagree about where a message ends.
+func TestProxyFramerPerDirectionFramesEachWayItsOwnWay(t *testing.T) {
+	// The upstream terminates its reply with a semicolon rather than a newline,
+	// so a single shared framer could not read both sides of this session.
+	up := newScriptedUpstream(t, "read-until-newline", "pong;")
+
+	p, _, _ := runProxy(t, Config{
+		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		NewFramer: func(dir Direction) (Framer, error) {
+			if dir == ToClient {
+				return delimFramer{delim: ';'}, nil
+			}
+
+			return lineFramer{}, nil
+		},
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	writeLine(t, conn, "ping")
+
+	got, err := bufio.NewReader(conn).ReadString(';')
+	if err != nil {
+		t.Fatalf("read the reply: %v", err)
+	}
+	if got != "pong;" {
+		t.Fatalf("got %q, want %q", got, "pong;")
+	}
+}
+
+// TestProxyReportsAFramerThatCannotBeBuilt keeps a framer failure from becoming
+// a session with no framing at all.
+func TestProxyReportsAFramerThatCannotBeBuilt(t *testing.T) {
+	up := newEchoUpstream(t)
+
+	p, _, sessionErrs := runProxy(t, Config{
+		Ports:     []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		NewFramer: func(Direction) (Framer, error) { return nil, errors.New("no framer today") },
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	buf := make([]byte, 1)
+	_, _ = conn.Read(buf)
+
+	if err := nextSessionError(t, sessionErrs); !strings.Contains(err.Error(), "no framer today") {
+		t.Fatalf("reported %v, want the framer's own error", err)
+	}
+	if n := up.connections(); n != 0 {
+		t.Fatalf("the upstream saw %d connections, want none — setup failed before the dial", n)
+	}
+}
+
+// TestProxyReportsANilFramerFromNewFramer catches the mistake that would
+// otherwise surface as a nil dereference on the first message.
+func TestProxyReportsANilFramerFromNewFramer(t *testing.T) {
+	up := newEchoUpstream(t)
+
+	p, _, sessionErrs := runProxy(t, Config{
+		Ports:     []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		NewFramer: func(Direction) (Framer, error) { return nil, nil },
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	buf := make([]byte, 1)
+	_, _ = conn.Read(buf)
+
+	if err := nextSessionError(t, sessionErrs); !strings.Contains(err.Error(), "returned no") {
+		t.Fatalf("reported %v, want a complaint about the nil framer", err)
 	}
 }
 

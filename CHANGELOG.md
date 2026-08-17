@@ -5,6 +5,21 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+## Unreleased
+
+### Added
+
+- `Config.NewFramer`, which builds a `Framer` per session and per direction.
+  `Config.Framer` stays as it was: one instance shared by every session and both
+  directions, which is right for a length prefix and wrong for a protocol that
+  finds a boundary by decoding. Set one or the other, not both.
+
+  Two things forced it, both found by migrating a real proxy onto this API. A
+  protocol with no length on the wire ends a message by its own shape, so
+  framing carries the same per-connection state decoding does — and needs it per
+  direction too, because the same leading byte means different packets arriving
+  from each peer.
+
 ## [0.2.1] — 2026-08-17
 
 ### Fixed

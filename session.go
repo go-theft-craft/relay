@@ -61,6 +61,11 @@ type Session struct {
 	// across sessions would have every client advancing everyone else's.
 	codec Codec
 
+	// framers holds this session's framer for each direction, indexed by it.
+	// Both entries are the config's one Framer unless NewFramer built them, in
+	// which case they are this session's own and may differ from each other.
+	framers [2]Framer
+
 	// clientSide and upstreamSide are the byte layers over the two connections.
 	// A message travelling ToClient is written to clientSide and a message
 	// travelling ToServer is read from it, which is why a pump reads from the
@@ -105,6 +110,7 @@ func newSession(parent context.Context, cfg *Config, client, upstream net.Conn, 
 		Info:          info,
 		cfg:           cfg,
 		codec:         cfg.Codec,
+		framers:       [2]Framer{cfg.Framer, cfg.Framer},
 		sinkID:        sinkID,
 		clientSide:    NewConduit(client, cfg.ReadBufferSize),
 		clientWrite:   make(chan struct{}, 1),
@@ -226,7 +232,7 @@ func (s *Session) write(dir Direction, raw []byte) error {
 		return ErrSessionClosed
 	}
 
-	return s.cfg.Framer.WriteMessage(s.conduit(dir), raw)
+	return s.framers[dir].WriteMessage(s.conduit(dir), raw)
 }
 
 // Inject sends a message to one peer as though the other had sent it.
@@ -376,7 +382,7 @@ func (s *Session) pump(dir Direction) error {
 	src := s.readSide(dir)
 
 	for {
-		raw, err := s.cfg.Framer.ReadMessage(src)
+		raw, err := s.framers[dir].ReadMessage(src)
 		if err != nil {
 			return err
 		}

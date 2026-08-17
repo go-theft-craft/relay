@@ -163,6 +163,30 @@ func TestConfigRejectsBothCodecForms(t *testing.T) {
 	}
 }
 
+// TestConfigRejectsBothFramerForms mirrors the codec rule: the two fields mean
+// different lifetimes, and silently preferring one would make the other look
+// broken.
+func TestConfigRejectsBothFramerForms(t *testing.T) {
+	cfg := minimalConfig()
+	cfg.NewFramer = func(Direction) (Framer, error) { return lineFramer{}, nil }
+
+	if err := cfg.validate(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("validate() with both Framer and NewFramer = %v, want ErrInvalidConfig", err)
+	}
+}
+
+// TestConfigAcceptsNewFramerAlone pins that NewFramer satisfies the framing
+// requirement on its own, which is the whole point of adding it.
+func TestConfigAcceptsNewFramerAlone(t *testing.T) {
+	cfg := minimalConfig()
+	cfg.Framer = nil
+	cfg.NewFramer = func(Direction) (Framer, error) { return lineFramer{}, nil }
+
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate() with only NewFramer = %v, want nil", err)
+	}
+}
+
 // TestConfigRejectsCaptureWithoutASink exists because capture with nowhere to
 // put it is a configuration mistake, and a silent no-op would look like a
 // capture that recorded nothing.

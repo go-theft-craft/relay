@@ -260,6 +260,24 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 		s.codec = codec
 	}
 
+	if p.cfg.NewFramer != nil {
+		for _, dir := range []Direction{ToServer, ToClient} {
+			framer, err := p.cfg.NewFramer(dir)
+			if err != nil {
+				p.cfg.OnSessionError(s, fmt.Errorf("relay: build the %s session framer: %w", dir, err))
+
+				return
+			}
+			if framer == nil {
+				p.cfg.OnSessionError(s, fmt.Errorf("relay: NewFramer returned no %s framer", dir))
+
+				return
+			}
+
+			s.framers[dir] = framer
+		}
+	}
+
 	if p.cfg.PreFrame != nil {
 		result, err := p.cfg.PreFrame.OnConnect(ctx, s, s.clientSide.PreFrameReader())
 		if err != nil {

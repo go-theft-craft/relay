@@ -46,7 +46,8 @@ type Config struct {
 	// repeat.
 	Ports []PortConfig
 
-	// Framer is required. Everything else on this line is optional: a Codec
+	// Framer or NewFramer is required. Everything else on this line is
+	// optional: a Codec
 	// makes decoded packets visible to hooks and sinks, a Prober replaces the
 	// default TCP dial with a health check that speaks the protocol, a Sink
 	// records what crossed the wire, and a Selector chooses among healthy
@@ -66,6 +67,24 @@ type Config struct {
 	// per direction as well, so one shared instance would have every client
 	// advancing everyone else's state. Set this or Codec, not both.
 	NewCodec func() (Codec, error)
+
+	// NewFramer builds a Framer per session and per direction, for a protocol
+	// whose message boundaries are not a pure function of the bytes.
+	//
+	// Framer above is one instance shared by every session and by both
+	// directions, which is right for a length prefix and wrong for anything
+	// that has to know what it is looking at. A protocol that finds a boundary
+	// by decoding — no length on the wire, so the packet's own shape ends it —
+	// needs the same per-connection state a Codec does, and needs it per
+	// direction too, because the same leading byte means different things
+	// arriving from each peer.
+	//
+	// It is called twice per session, once per direction, and the returned
+	// framer handles messages travelling that way: the ToServer framer reads
+	// the client connection and writes the upstream one. Set this or Framer,
+	// not both. A session whose framer cannot be built is reported to
+	// OnSessionError and dropped, since there is no framing without it.
+	NewFramer func(Direction) (Framer, error)
 
 	// CaptureRaw records every byte crossing the client connection to
 	// Sink.RawChunk, below any framing and below any mid-stream transform.
@@ -124,8 +143,11 @@ type Config struct {
 // validate reports every configuration fault as ErrInvalidConfig and fills the
 // defaults in place.
 func (c *Config) validate() error {
-	if c.Framer == nil {
-		return fmt.Errorf("%w: Framer is required", ErrInvalidConfig)
+	if c.Framer == nil && c.NewFramer == nil {
+		return fmt.Errorf("%w: Framer or NewFramer is required", ErrInvalidConfig)
+	}
+	if c.Framer != nil && c.NewFramer != nil {
+		return fmt.Errorf("%w: set Framer or NewFramer, not both", ErrInvalidConfig)
 	}
 	if len(c.Ports) == 0 {
 		return fmt.Errorf("%w: at least one port is required", ErrInvalidConfig)
