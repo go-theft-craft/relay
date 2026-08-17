@@ -413,6 +413,57 @@ func TestATruncatedRecordingIsAnErrorNotAShortTrace(t *testing.T) {
 	}
 }
 
+// TestARecordingThatDecodesNothingIsAnErrorNotAnEmptyResult reproduces the
+// shape of the first live capture taken against a compressing vanilla server.
+// Every stored payload still wore its compression envelope while the decoding
+// session believed none had been negotiated, so the leading data-length byte
+// read as a packet ID and every play packet failed. Skipping them one at a time
+// produced a successful run with no trajectories in it — which is indisputable
+// evidence that nothing moved, and was nothing of the kind.
+func TestARecordingThatDecodesNothingIsAnErrorNotAnEmptyResult(t *testing.T) {
+	t.Parallel()
+
+	r := newRecorder(t)
+	records := []mccapture.Record{
+		r.record(&v1_8.PlayClientboundNamedEntitySpawn{EntityID: 7, X: 100 * 32, Y: 64 * 32, Z: 200 * 32}),
+		r.record(&v1_8.PlayClientboundRelEntityMove{EntityID: 7, DX: 16}),
+	}
+
+	// A zero data-length varint in front of each payload is what an unstripped
+	// uncompressed envelope looks like to a session that is not expecting one.
+	for i := range records {
+		records[i].Payload = append([]byte{0x00}, records[i].Payload...)
+	}
+
+	traces, err := trace.Extract(v1_8.Protocol(), testLimits(t), records)
+	if !errors.Is(err, trace.ErrUndecodable) {
+		t.Fatalf("Extract = (%d traces, %v), want ErrUndecodable", len(traces), err)
+	}
+}
+
+// TestACaptureThatNeverReachedPlayIsNotAFailure is the other side of that rule.
+// A recording that ends during login holds no trajectories because there were
+// none to hold, and reporting that as a decode failure would make the gate cry
+// wolf on every status ping and every rejected login.
+func TestACaptureThatNeverReachedPlayIsNotAFailure(t *testing.T) {
+	t.Parallel()
+
+	traces, err := trace.Extract(v1_8.Protocol(), testLimits(t), []mccapture.Record{{
+		Kind:        mccapture.KindPacket,
+		Sequence:    1,
+		Direction:   protocol.DirectionClientbound,
+		BeforeState: protocol.State("login"),
+		State:       protocol.State("login"),
+		Payload:     []byte{0x7f, 0x00},
+	}})
+	if err != nil {
+		t.Fatalf("Extract on a login-only recording: %v", err)
+	}
+	if len(traces) != 0 {
+		t.Errorf("extracted %d traces from a login-only recording, want 0", len(traces))
+	}
+}
+
 // TestAnotherProtocolIsRefused states the boundary rather than guessing across
 // it. Decoding 775 with 47's packet identifiers and scales would produce
 // numbers that look like a trajectory and are not one.

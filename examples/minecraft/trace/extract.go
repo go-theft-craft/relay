@@ -28,6 +28,19 @@ var ErrUnsupportedProtocol = errors.New("trace: unsupported protocol")
 // which is exactly the kind of plausible artefact an oracle must never produce.
 var ErrUnknownEntity = errors.New("trace: movement for an entity that never spawned")
 
+// statePlay is the only connection state a trajectory can come from.
+const statePlay = protocol.State("play")
+
+// ErrUndecodable reports a recording whose play packets this build could not
+// read at all.
+//
+// It exists because the alternative is worse than a crash: an empty trace list
+// and a zero exit code, which reads as "nothing moved" when it means "nothing
+// was read". The first capture taken through a proxy against a compressing
+// vanilla server did exactly that — 15916 records skipped one at a time, every
+// play packet mis-read, and a successful-looking run with no trajectories in it.
+var ErrUndecodable = errors.New("trace: the recording's play packets did not decode")
+
 // Extract accumulates every entity's absolute motion from one recording.
 //
 // It takes the descriptor and limits rather than deriving them, because the
@@ -60,6 +73,21 @@ func Extract(descriptor protocol.Protocol, limits protocol.Limits, records []mcc
 		if err := e.consume(record); err != nil {
 			return nil, err
 		}
+	}
+
+	// A recording whose play half did not decode at all produced no trajectories
+	// because nothing was read, not because nothing moved, and those two look
+	// identical in the output. Skipping one unreadable packet is deliberate;
+	// skipping every one of them and reporting success is the same failure
+	// ExtractFile guards at the other end of the file, arriving through a
+	// different door.
+	//
+	// The rule is all-or-nothing on purpose. A capture legitimately holds frames
+	// this build cannot parse, so any threshold below "none of them" would be a
+	// number nobody could defend — while none at all can only mean the session
+	// was decoding under different rules than the ones that wrote the file.
+	if e.playOffered > 0 && e.playDecoded == 0 {
+		return nil, fmt.Errorf("%w: %d play records, none decoded", ErrUndecodable, e.playOffered)
 	}
 
 	return e.done(), nil
@@ -96,6 +124,14 @@ type extractor struct {
 	// the trace just carries a zero ID, which is honest about not knowing.
 	self  int32
 	named bool
+
+	// playOffered and playDecoded count the play-state packet records this
+	// extractor was handed and the ones it could read. They are counted for the
+	// play state alone because that is the only state trajectories come from: a
+	// capture that ends during login is complete and traceless, and must not be
+	// confused with one that decoded nothing.
+	playOffered int
+	playDecoded int
 }
 
 // consume applies one record.
@@ -127,12 +163,23 @@ func (e *extractor) consume(record mccapture.Record) error {
 		}
 	}
 
+	play := session.State() == statePlay
+	if play {
+		e.playOffered++
+	}
+
 	packet, err := session.DecodeFrame(record.Payload)
 	if err != nil {
 		// An undecodable packet is not fatal. A recording is expected to hold
 		// frames this build cannot parse — that is why the raw records exist —
 		// and an entity trace is not made wrong by a chat message it skipped.
+		// Extract counts them, though, because a file in which every one of them
+		// failed is not a file with nothing in it.
 		return nil
+	}
+
+	if play {
+		e.playDecoded++
 	}
 
 	if transition, ok, err := session.ProposeTransition(packet); err == nil && ok {
