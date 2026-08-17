@@ -251,7 +251,28 @@ real files rather than synthetic ones — `recordings/002` exits 1, while
 One stated consequence: a play capture too short to hold any position packet now
 trips this. That is the right answer — a file that short is not evidence either.
 
+### Step 7: the same binary in front of our own server
+
+Run against `server` built from its own tree, on port 25567, `-online-mode=false`,
+`-generator flat`, and its default `-compression-threshold` of 256 — so this is
+also a second protocol implementation negotiating compression, and a second
+check on the fix rather than a repeat of the first.
+
+The same `mcrelay` binary, unchanged and given nothing but a different
+`-upstream`, recorded one login and one walk:
+
+- `verify`: ok, 212 records, replays to its own digest.
+- `trace`: one player trace, 11 samples — the server's opening teleport at
+  (0.5, 5, 0.5), then exactly the ten steps of 0.2 the client sent, ending at
+  (2.5, 5, 0.5). Ground truth and extraction agree to the last digit again.
+
+The first sample carries `onGround=false` because a teleport says nothing about
+footing, which is what the extractor documents it will do rather than a
+disagreement.
+
+That settles what step 7 was for: recording a session against our own server
+needs no code in that server, so its packet log never has to grow.
+
 ### Still open
 
-- **Step 7**, the same binary in front of our own `server`, was not run. It is
-  the only item from the procedure above that has no result.
+Nothing from the procedure. Every step has a result above.
