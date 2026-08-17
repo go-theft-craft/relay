@@ -5,7 +5,7 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
-## Unreleased
+## [0.3.0] — 2026-08-17
 
 ### Added
 
@@ -39,6 +39,9 @@ version is `0`, a minor bump may break the API.
   nothing in this repository had ever negotiated compression. The live procedure
   in `docs/verification/2026-08-17-capture-oracle.md` found it on its first run,
   and the same document records the fix replaying at vanilla's default threshold.
+
+  The stub now logs in and negotiates a threshold, so this class of defect fails
+  in CI rather than waiting for somebody with a Minecraft client.
 
 ## [0.2.1] — 2026-08-17
 
