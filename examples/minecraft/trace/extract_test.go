@@ -436,8 +436,39 @@ func TestARecordingThatDecodesNothingIsAnErrorNotAnEmptyResult(t *testing.T) {
 	}
 
 	traces, err := trace.Extract(v1_8.Protocol(), testLimits(t), records)
-	if !errors.Is(err, trace.ErrUndecodable) {
-		t.Fatalf("Extract = (%d traces, %v), want ErrUndecodable", len(traces), err)
+	if !errors.Is(err, trace.ErrNoTrajectories) {
+		t.Fatalf("Extract = (%d traces, %v), want ErrNoTrajectories", len(traces), err)
+	}
+}
+
+// TestSomeFramesParsingDoesNotMakeARecordingReadable is the case that killed
+// the first version of this guard, which asked whether anything decoded rather
+// than whether anything moved.
+//
+// Over a real unreadable capture, 431 of 7954 play records decoded and none of
+// them carried motion. Protocol 47 has zero-field packets, so a frame whose
+// first byte lands on one parses no matter what follows it, and a handful of
+// those keeps a decode counter off zero indefinitely while the file is
+// gibberish. Here keep-alive plays that part.
+func TestSomeFramesParsingDoesNotMakeARecordingReadable(t *testing.T) {
+	t.Parallel()
+
+	r := newRecorder(t)
+	spawn := r.record(&v1_8.PlayClientboundNamedEntitySpawn{EntityID: 7, X: 100 * 32, Y: 64 * 32, Z: 200 * 32})
+	move := r.record(&v1_8.PlayClientboundRelEntityMove{EntityID: 7, DX: 16})
+	spawn.Payload = append([]byte{0x00}, spawn.Payload...)
+	move.Payload = append([]byte{0x00}, move.Payload...)
+
+	traces, err := trace.Extract(v1_8.Protocol(), testLimits(t), []mccapture.Record{
+		// Decodes cleanly, and says nothing about where anything is.
+		r.record(&v1_8.PlayClientboundKeepAlive{KeepAliveID: 1}),
+		spawn,
+		move,
+		r.record(&v1_8.PlayClientboundKeepAlive{KeepAliveID: 2}),
+	})
+
+	if !errors.Is(err, trace.ErrNoTrajectories) {
+		t.Fatalf("Extract = (%d traces, %v), want ErrNoTrajectories", len(traces), err)
 	}
 }
 

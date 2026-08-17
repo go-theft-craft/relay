@@ -31,15 +31,14 @@ var ErrUnknownEntity = errors.New("trace: movement for an entity that never spaw
 // statePlay is the only connection state a trajectory can come from.
 const statePlay = protocol.State("play")
 
-// ErrUndecodable reports a recording whose play packets this build could not
-// read at all.
+// ErrNoTrajectories reports a recording that reached play and yielded no
+// motion, which means it was not read rather than that nothing happened.
 //
 // It exists because the alternative is worse than a crash: an empty trace list
-// and a zero exit code, which reads as "nothing moved" when it means "nothing
-// was read". The first capture taken through a proxy against a compressing
-// vanilla server did exactly that — 15916 records skipped one at a time, every
-// play packet mis-read, and a successful-looking run with no trajectories in it.
-var ErrUndecodable = errors.New("trace: the recording's play packets did not decode")
+// and a zero exit code. The first capture taken through a proxy against a
+// compressing vanilla server did exactly that — 15916 records skipped one at a
+// time and a successful-looking run with nothing in it.
+var ErrNoTrajectories = errors.New("trace: the recording reached play and produced no trajectories")
 
 // Extract accumulates every entity's absolute motion from one recording.
 //
@@ -75,19 +74,32 @@ func Extract(descriptor protocol.Protocol, limits protocol.Limits, records []mcc
 		}
 	}
 
-	// A recording whose play half did not decode at all produced no trajectories
-	// because nothing was read, not because nothing moved, and those two look
-	// identical in the output. Skipping one unreadable packet is deliberate;
-	// skipping every one of them and reporting success is the same failure
+	// A play capture that yielded no trajectory at all was not read. Skipping one
+	// unreadable packet is deliberate; skipping every packet that carries motion
+	// and reporting success says nothing moved when it means nothing was read,
+	// and those are indistinguishable in the output. It is the same failure
 	// ExtractFile guards at the other end of the file, arriving through a
 	// different door.
 	//
-	// The rule is all-or-nothing on purpose. A capture legitimately holds frames
-	// this build cannot parse, so any threshold below "none of them" would be a
-	// number nobody could defend — while none at all can only mean the session
-	// was decoding under different rules than the ones that wrote the file.
-	if e.playOffered > 0 && e.playDecoded == 0 {
-		return nil, fmt.Errorf("%w: %d play records, none decoded", ErrUndecodable, e.playOffered)
+	// The test is whether anything moved, not whether anything decoded, because
+	// the second question has a useless answer on a real session. Measured over
+	// a genuinely unreadable capture: 7954 play records offered, 431 decoded,
+	// zero trajectories. Protocol 47's arm_animation has an empty body, so any
+	// frame whose first byte lands on its ID parses into a valid zero-field
+	// packet no matter what the following bytes are — 413 of them here, plus a
+	// chat and seventeen map_chunk_bulk. A decode counter can therefore sit
+	// comfortably off zero while the file is gibberish.
+	//
+	// Motion has no such escape. A server teleports a player before they can
+	// act, and a client reports its position around twenty times a second, so a
+	// capture holding play frames and no position at all in either direction has
+	// failed to be read — or is far too short to be evidence of anything, which
+	// earns the same answer.
+	if e.playOffered > 0 && len(e.order) == 0 {
+		return nil, fmt.Errorf(
+			"%w: %d play records offered, %d decoded, no trajectories",
+			ErrNoTrajectories, e.playOffered, e.playDecoded,
+		)
 	}
 
 	return e.done(), nil
