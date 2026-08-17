@@ -105,6 +105,7 @@ func TestALoginThatNegotiatesCompressionProducesAReplayableCapture(t *testing.T)
 			}
 
 			assertTheTrajectoryCameBack(t, matches[0])
+			assertTheArrowCameBack(t, matches[0])
 		})
 	}
 }
@@ -198,6 +199,46 @@ func assertTheTrajectoryCameBack(t *testing.T, path string) {
 	t.Error("the capture produced no player trace")
 }
 
+// assertTheArrowCameBack covers the other half of the extractor: motion the
+// server narrated about an entity the client never sent a packet for, including
+// a relative move, which is the form most motion arrives in.
+func assertTheArrowCameBack(t *testing.T, path string) {
+	t.Helper()
+
+	traces, _, err := trace.ExtractFile(path)
+	if err != nil {
+		t.Fatalf("trace.ExtractFile: %v", err)
+	}
+
+	for _, candidate := range traces {
+		if candidate.Family != trace.FamilyArrow {
+			continue
+		}
+
+		if len(candidate.Samples) != 2 {
+			t.Fatalf("the arrow trace holds %d samples, want the spawn and the move", len(candidate.Samples))
+		}
+
+		spawn := candidate.Samples[0].Position
+		if spawn.X != stubSpawnX || spawn.Y != stubSpawnY || spawn.Z != stubSpawnZ {
+			t.Errorf("the arrow spawned at (%v, %v, %v), want (%v, %v, %v) — a fixed-point scale or an axis fault",
+				spawn.X, spawn.Y, spawn.Z, stubSpawnX, stubSpawnY, stubSpawnZ)
+		}
+
+		// One block east of the spawn: the relative move accumulated onto it
+		// rather than replacing it or being read at the wrong scale.
+		moved := candidate.Samples[1].Position
+		if moved.X != stubSpawnX+1 || moved.Y != stubSpawnY || moved.Z != stubSpawnZ {
+			t.Errorf("the arrow moved to (%v, %v, %v), want (%v, %v, %v)",
+				moved.X, moved.Y, moved.Z, stubSpawnX+1, stubSpawnY, stubSpawnZ)
+		}
+
+		return
+	}
+
+	t.Error("the capture produced no arrow trace")
+}
+
 func loginRecords(t *testing.T, path string) []capturepkg.Record {
 	t.Helper()
 
@@ -234,6 +275,13 @@ func loginRecords(t *testing.T, path string) []capturepkg.Record {
 // recomputing it.
 // compressPacketID is set compression in protocol 47's login state.
 const compressPacketID = 0x03
+
+// The arrow the stub spawns. Type 60 is protocol 47's arrow, and the ID is
+// arbitrary beyond being one the join never claimed.
+const (
+	stubArrowID   int32 = 4242
+	stubArrowType int8  = 60
+)
 
 const (
 	stubSpawnX = 8.5
@@ -359,6 +407,37 @@ func (s *loginStub) serve(t *testing.T, descriptor protocol.Protocol, conn net.C
 	// is not spawned to itself, so nothing else says where it starts.
 	if !writeLoginPacket(session, framer, conn, 0x08, protocol.State("play"), &v1_8.PlayClientboundPosition{
 		X: stubSpawnX, Y: stubSpawnY, Z: stubSpawnZ, Yaw: 0, Pitch: 0, Flags: 0,
+	}) {
+		return
+	}
+
+	// An arrow, spawned and then moved. The player's own trajectory comes back
+	// through a different path than everything else's — the client reports it,
+	// the server narrates the rest — so a capture that only proved the player
+	// would leave the half that carries every other entity untested.
+	if !writeLoginPacket(session, framer, conn, 0x0e, protocol.State("play"), &v1_8.PlayClientboundSpawnEntity{
+		EntityID: stubArrowID,
+		Type:     stubArrowType,
+		X:        int32(stubSpawnX * 32),
+		Y:        int32(stubSpawnY * 32),
+		Z:        int32(stubSpawnZ * 32),
+		ObjectData: v1_8.PlayClientboundSpawnEntityObjectDataSwitch{
+			Default: v1_8.PlayClientboundSpawnEntityObjectDataSwitchDefault{VelocityX: 0, VelocityY: 0, VelocityZ: 0},
+		},
+	}) {
+		return
+	}
+
+	// A relative move, which is how the server reports most motion. It is sent
+	// in thirty-seconds of a block, so this is one block east and nothing else —
+	// the same axis the player walks, which would catch a transposition that
+	// happened to be symmetric.
+	if !writeLoginPacket(session, framer, conn, 0x15, protocol.State("play"), &v1_8.PlayClientboundRelEntityMove{
+		EntityID: stubArrowID,
+		DX:       32,
+		DY:       0,
+		DZ:       0,
+		OnGround: false,
 	}) {
 		return
 	}
