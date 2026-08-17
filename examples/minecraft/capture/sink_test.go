@@ -3,6 +3,7 @@ package capture_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -386,6 +387,89 @@ func TestTheKeyExchangeIsStillWithheldAfterTheReorder(t *testing.T) {
 
 	if !withheld {
 		t.Error("the key exchange was recorded in the clear")
+	}
+}
+
+// TestARecordingEndsAtTheKeyExchange covers what a capture of an online-mode
+// login is: a login, and then a record saying the recorder stopped being able to
+// look.
+//
+// Everything after the client's answer is enciphered, so it arrives here in
+// whatever chunks the transport chose rather than in frames. The recorder used
+// to file those as raw frames — rebuilding the length prefix relay strips, which
+// puts a number in the file that was never on the wire — and to ask the
+// sensitivity question about them, which reads a packet identifier out of
+// ciphertext and withholds a record whenever one happens to match.
+//
+// The secret record is what the format has for this. Replay skips it and the
+// digest excludes it, so a capture that ends here still replays; without it a
+// reader could not tell this file from a recorder that stopped for a reason
+// nobody wrote down.
+func TestARecordingEndsAtTheKeyExchange(t *testing.T) {
+	t.Parallel()
+
+	descriptor, known := protocols.Resolve("java/1.8.9")
+	if !known {
+		t.Fatal("protocol java/1.8.9 is not registered")
+	}
+
+	recorder, dir := newRecorderFor(t, descriptor)
+	id := openSession(t, recorder)
+
+	recorder.Message(t.Context(), id, decoded(relay.ToServer, "login/login_start", 0, protocol.State("login"), []byte{0x00, 0x06, 't', 'e', 's', 't', 'e', 'r'}))
+
+	// The client's answer, which is the last frame in the clear. The value is
+	// what the protocol is asked about — an identifier alone cannot say which
+	// packet this is, since the request shares it.
+	answer := decoded(relay.ToClient, "login/encryption_begin", 1, protocol.State("login"), []byte{0x01, 0xde, 0xad})
+	answer.Dir = relay.ToServer
+	answer.Decoded = protocol.Packet{
+		State:     protocol.State("login"),
+		Direction: protocol.DirectionServerbound,
+		ID:        1,
+		Name:      "login/encryption_begin",
+		Value:     &v1_8.LoginServerboundEncryptionBegin{SharedSecret: []byte{0xde, 0xad}, VerifyToken: []byte{0xbe, 0xef}},
+	}
+
+	recorder.Message(t.Context(), id, answer)
+
+	// Ciphertext, arriving with nothing decoded and no length prefix. Two of
+	// them, so a recorder that filed only the first would still fail.
+	ciphertext := []byte{0x95, 0xd4, 0x69, 0xa9, 0xe3}
+	for range 2 {
+		recorder.Message(t.Context(), id, relay.MessageRecord{Dir: relay.ToClient, Raw: ciphertext, At: time.Now()})
+	}
+
+	recorder.CloseSession(t.Context(), id)
+
+	var (
+		secrets int
+		after   []string
+	)
+
+	for _, record := range mustRecords(t, dir) {
+		if secrets > 0 && record.Kind != mccapture.KindTrailer {
+			after = append(after, fmt.Sprintf("kind %d", record.Kind))
+		}
+
+		if record.Kind == mccapture.KindSecret {
+			secrets++
+
+			if !record.Redacted || len(record.Payload) != 0 {
+				t.Error("the record marking the switch carries material; the proxy never held any")
+			}
+		}
+
+		if bytes.Contains(record.Payload, ciphertext) {
+			t.Error("a ciphertext chunk was filed as a frame")
+		}
+	}
+
+	if secrets != 1 {
+		t.Errorf("the recording holds %d records marking the switch, want 1", secrets)
+	}
+	if len(after) != 0 {
+		t.Errorf("the recording holds %d records after the switch: %v", len(after), after)
 	}
 }
 

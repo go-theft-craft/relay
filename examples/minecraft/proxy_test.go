@@ -93,7 +93,7 @@ func (s *stubServer) serve(t *testing.T, conn net.Conn) {
 		return
 	}
 
-	framer, err := minecraft.NewFramer(limits)
+	framer, err := minecraft.NewFramer(nil, limits)
 	if err != nil {
 		return
 	}
@@ -156,7 +156,7 @@ func statusClient(t *testing.T, addr string) string {
 		t.Fatalf("NewLimits: %v", err)
 	}
 
-	framer, err := minecraft.NewFramer(limits)
+	framer, err := minecraft.NewFramer(nil, limits)
 	if err != nil {
 		t.Fatalf("NewFramer: %v", err)
 	}
@@ -293,11 +293,6 @@ func runExampleProxyRecording(t *testing.T, upstream string, capture bool, extra
 		t.Fatalf("NewLimits: %v", err)
 	}
 
-	framer, err := minecraft.NewFramer(limits)
-	if err != nil {
-		t.Fatalf("NewFramer: %v", err)
-	}
-
 	dbPath = filepath.Join(t.TempDir(), "relay.db")
 
 	sink, err = store.Open(dbPath, store.WithFlushInterval(20*time.Millisecond))
@@ -311,10 +306,12 @@ func runExampleProxyRecording(t *testing.T, upstream string, capture bool, extra
 	}
 
 	p, err := relay.New(relay.Config{
-		Ports:  []relay.PortConfig{{Port: 0, Upstreams: []relay.Upstream{{Addr: upstream}}}},
-		Framer: framer,
-		NewCodec: func(*relay.Session) (relay.Codec, error) {
-			return minecraft.NewCodec(descriptor, limits)
+		Ports: []relay.PortConfig{{Port: 0, Upstreams: []relay.Upstream{{Addr: upstream}}}},
+		NewCodec: func(session *relay.Session) (relay.Codec, error) {
+			return minecraft.NewCodec(session, descriptor, limits)
+		},
+		NewFramer: func(session *relay.Session, _ relay.Direction) (relay.Framer, error) {
+			return minecraft.NewFramer(session, limits)
 		},
 		Prober:     minecraft.Prober{Descriptor: descriptor, Timeout: 5 * time.Second},
 		Sink:       sinks,
@@ -740,7 +737,7 @@ func TestEndToEndASessionThatOutrunsItsRecorderIsEnded(t *testing.T) {
 
 	descriptor := protocols.Default()
 
-	framer, err := minecraft.NewFramer(limits)
+	framer, err := minecraft.NewFramer(nil, limits)
 	if err != nil {
 		t.Fatalf("NewFramer: %v", err)
 	}

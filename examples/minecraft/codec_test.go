@@ -32,7 +32,7 @@ const (
 func newCodec(t *testing.T) *minecraft.Codec {
 	t.Helper()
 
-	c, err := minecraft.NewCodec(protocols.Default(), testLimits(t))
+	c, err := minecraft.NewCodec(nil, protocols.Default(), testLimits(t))
 	if err != nil {
 		t.Fatalf("NewCodec: %v", err)
 	}
@@ -326,7 +326,7 @@ func clientboundPacket(t *testing.T, descriptor protocol.Protocol, state protoco
 func TestCodecFollowsTheLoginIntoPlay(t *testing.T) {
 	descriptor := v1_8.Protocol()
 
-	c, err := minecraft.NewCodec(descriptor, testLimits(t))
+	c, err := minecraft.NewCodec(nil, descriptor, testLimits(t))
 	if err != nil {
 		t.Fatalf("NewCodec: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestCodecFollowsSetCompression(t *testing.T) {
 func TestCodecFollowsAThresholdThatChanges(t *testing.T) {
 	descriptor := v1_8.Protocol()
 
-	c, err := minecraft.NewCodec(descriptor, testLimits(t))
+	c, err := minecraft.NewCodec(nil, descriptor, testLimits(t))
 	if err != nil {
 		t.Fatalf("NewCodec: %v", err)
 	}

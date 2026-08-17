@@ -125,11 +125,6 @@ func run(args []string) error {
 		return err
 	}
 
-	framer, err := minecraft.NewFramer(limits)
-	if err != nil {
-		return err
-	}
-
 	sink, err := store.Open(*dbPath)
 	if err != nil {
 		return err
@@ -173,14 +168,19 @@ func run(args []string) error {
 	}
 
 	proxy, err := relay.New(relay.Config{
-		Ports:  portConfigs,
-		Framer: framer,
+		Ports: portConfigs,
 		// A codec per session, not one shared: this one holds two protocol
 		// sessions and a state machine, all of which belong to one connection.
 		// Sharing a single instance would have every client advancing everyone
 		// else's handshake.
-		NewCodec: func(*relay.Session) (relay.Codec, error) {
-			return minecraft.NewCodec(descriptor, limits)
+		NewCodec: func(session *relay.Session) (relay.Codec, error) {
+			return minecraft.NewCodec(session, descriptor, limits)
+		},
+		// A framer per session and per direction, for the same reason and one
+		// more: a framer here can stop framing, and it does so for one session
+		// and one direction at a time. See minecraft.Framer.
+		NewFramer: func(session *relay.Session, _ relay.Direction) (relay.Framer, error) {
+			return minecraft.NewFramer(session, limits)
 		},
 		// Health that means the server answered, rather than that something
 		// holds the port open.
@@ -231,6 +231,22 @@ func run(args []string) error {
 // worked consumer in examples/cipher.
 func describePackets(logger *slog.Logger) relay.Hook {
 	return relay.HookFunc(func(_ context.Context, s *relay.Session, m *relay.Message) (relay.Action, error) {
+		// Once the session is enciphered a message is a socket read rather than
+		// a packet, so the fields below would report a packet identifier of zero
+		// and no name for every one of them — which reads as a stream of
+		// keep-alives rather than as a proxy that has stopped being able to
+		// look. Asking is the same question a hook has to ask before injecting.
+		if minecraft.Encrypted(s) {
+			logger.Debug(
+				"opaque",
+				slog.Int64("session", s.ID),
+				slog.String("dir", m.Dir.String()),
+				slog.Int("bytes", len(m.Raw)),
+			)
+
+			return relay.Forward, nil
+		}
+
 		logger.Debug(
 			"packet",
 			slog.Int64("session", s.ID),

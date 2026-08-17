@@ -126,6 +126,10 @@ and the mirror case has no test.
   running two key exchanges, which `codec.go:182` declines on purpose. Testing
   the encrypted path means testing that the proxy relays opaquely and that the
   recorder records honestly, which is a different plan.
+
+  > That plan is `docs/2026-08-17-the-encryption-remainder.md`, executed the same
+  > day. Both halves named here turned out to be false as written: the proxy did
+  > not relay opaquely, and the recorder did not record honestly.
 - **Compression settings other than the threshold.** The policy — algorithm,
   decompressed ceiling — is stamped into the capture header and does not change
   mid-session.

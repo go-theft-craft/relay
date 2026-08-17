@@ -146,6 +146,12 @@ type recording struct {
 	// relays nothing: it is asked one question per frame.
 	sensitive        protocol.SensitiveFrames
 	sensitiveSession protocol.Session
+	// secrets answers the same question about a decoded packet, which is how
+	// this recording knows the key exchange has completed. See opaque.
+	secrets protocol.SensitivePackets
+	// opaque latches when the session stops carrying frames, which happens once
+	// and never unwinds. Everything after it is bytes: see Recorder.Message.
+	opaque bool
 
 	// failed is atomic because either side can set it: the pump when the queue
 	// overflows, the writer when the file refuses a record.
@@ -239,6 +245,10 @@ func (r *Recorder) OpenSession(ctx context.Context, info relay.SessionInfo) (int
 			entry.sensitive = frames
 			entry.sensitiveSession = session
 		}
+
+		if packets, ok := session.(protocol.SensitivePackets); ok {
+			entry.secrets = packets
+		}
 	}
 
 	r.mu.Lock()
@@ -284,6 +294,17 @@ func (r *Recorder) Message(ctx context.Context, id int64, record relay.MessageRe
 	elapsed := record.At.Sub(entry.started)
 	if elapsed < 0 {
 		elapsed = 0
+	}
+
+	// Past the key exchange there is nothing here to record. What arrives is
+	// ciphertext in chunks the transport chose, not frames, and the file format
+	// has no record that means "some bytes": a raw record claims to be one
+	// complete frame, and writing chunks into one produces a file that reads
+	// back and cannot replay. The secret record written at the switch is what
+	// says where this recording stopped being able to see, which is the honest
+	// thing a capture can say and the reason it is not silent about it.
+	if entry.opaque {
+		return
 	}
 
 	entry.frame++
@@ -357,6 +378,74 @@ func (r *Recorder) Message(ctx context.Context, id int64, record relay.MessageRe
 	}
 
 	entry.state = after
+
+	// The frame just recorded may have been the last one this recording can
+	// read. A key exchange ends with a sensitive packet from the client, and
+	// everything after it is enciphered.
+	//
+	// This recording works that out for itself rather than being told by the
+	// codec, which is the same independence the rest of this file rests on: it
+	// keeps its own session, applies its own transitions, and asks its own
+	// sensitivity questions, so that a recording is a second opinion about a
+	// connection rather than a copy of the first. The protocol answers which
+	// packet it is, so no packet identifier is written down here.
+	if !entry.opaque && entry.completesAKeyExchange(dir, record) {
+		entry.opaque = true
+
+		r.markEncrypted(ctx, entry, dir, before, after, elapsed)
+	}
+}
+
+// markEncrypted writes the record that says where this recording went dark.
+//
+// The format has a record for exactly this and it is the reason a capture is
+// allowed to end early: a secret record marks the switch, carries no material
+// unless the writer discloses, and is skipped by replay and excluded from the
+// digest. Without it a reader could not tell an online-mode login from a
+// recorder that stopped for a reason nobody wrote down, and those two files
+// must not look alike.
+//
+// It must be called with the recording's mutex held.
+func (r *Recorder) markEncrypted(
+	ctx context.Context,
+	entry *recording,
+	dir protocol.Direction,
+	before, after protocol.State,
+	elapsed time.Duration,
+) {
+	r.observe(ctx, entry, protocol.Observation{
+		Frame:     entry.frame,
+		Direction: dir,
+		Stage:     protocol.ObservationSecret,
+		Elapsed:   elapsed,
+		Before:    protocol.NewSnapshot(before, nil),
+		After:     protocol.NewSnapshot(after, nil),
+		// The material is the one thing this must never carry. The proxy never
+		// held it — it relayed the exchange without standing in it — so there
+		// is nothing to disclose even under a disclosing writer.
+		Redacted: true,
+	})
+}
+
+// completesAKeyExchange reports whether the packet just recorded was the last
+// one either peer sends in the clear.
+//
+// The protocol names the packets that carry key material; the direction is what
+// separates the request from the answer to it. A server asks and a client
+// answers, and it is the answer that switches both ciphers on.
+//
+// It must be called with the recording's mutex held.
+func (e *recording) completesAKeyExchange(dir protocol.Direction, record relay.MessageRecord) bool {
+	if e.secrets == nil || dir != protocol.DirectionServerbound {
+		return false
+	}
+
+	packet, ok := record.Decoded.(protocol.Packet)
+	if !ok {
+		return false
+	}
+
+	return e.secrets.Sensitive(packet)
 }
 
 // RawChunk implements relay.Sink and deliberately records nothing.

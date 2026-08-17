@@ -51,6 +51,40 @@ version is `0`, a minor bump may break the API.
   `captureConn`'s mutex — the one stall a per-direction queue could not have
   confined.
 
+### Fixed
+
+- `examples/minecraft` did not relay an encrypted session, though three places
+  said it did. The codec stopped decoding at the key exchange as documented, and
+  the framer went on reading length prefixes out of ciphertext: it took a phantom
+  13-byte frame, then read a prefix announcing 1.7 MB, and parked waiting for a
+  frame nobody had sent. Under the frame limit, so nothing was refused — no
+  error, and the session's only log line was the codec's own notice that it had
+  stopped decoding, which reads like the documented behaviour working.
+
+  The codec now latches on the session and both framers read it, stopping at the
+  same point the codec does: `minecraft.NewCodec` and `minecraft.NewFramer` take
+  the `*relay.Session`, and the framer is built per session and per direction
+  through `Config.NewFramer`. The latch is checked after the first byte of a read
+  as well as before it, because the clientbound pump is parked on that byte when
+  the exchange completes on the other pump. The write side follows the last read
+  instead of the latch, since the frame that completes the exchange is read as a
+  frame and written after the latch is set — keying on the latch drops its length
+  prefix and the upstream never switches its own cipher.
+
+- `examples/minecraft/capture` recorded ciphertext as though it were frames: it
+  rebuilt the length prefix relay strips, putting a number in the file that was
+  never on the wire, and asked the sensitivity question about payloads that are
+  ciphertext — which eventually produces a packet identifier that matches and
+  withholds a record for a reason nobody can reconstruct. A recording now ends at
+  the key exchange with a secret record marking the switch, which is what the
+  capture format has that record for: replay skips it, the digest excludes it,
+  and a reader can tell an online-mode login from a recorder that stopped for a
+  reason nobody wrote down.
+
+  Nothing caught either of these because no test here had ever run a key
+  exchange. `examples/minecraft/encryption_test.go` now does, and
+  `docs/2026-08-17-the-encryption-remainder.md` records what the first run found.
+
 ## [0.3.0] — 2026-08-17
 
 ### Added

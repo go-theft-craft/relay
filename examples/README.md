@@ -125,8 +125,22 @@ mcrelay trace -in ./recordings/session.mccap -out t.json  # trajectories
   file's own trailer carries. A recording that does not reproduce itself is not
   evidence.
 
-**Decoding still stops at encryption.** Once a session completes a key exchange
-the codec returns `ErrEncrypted` and the relay falls back to opaque passthrough.
+**Decoding still stops at encryption, and so does framing.** Once a session
+completes a key exchange the codec returns `ErrEncrypted` and both framers stop
+looking for length prefixes, because an enciphered stream carries none a third
+party can read. Half of that is not optional: a framer that keeps parsing finds
+lengths in ciphertext, and the first one that asks for more bytes than were sent
+parks the session with no error to point at. The codec sets a latch on the
+session and the framers read it — `relay.Config.NewFramer` documents session
+metadata as the place for exactly this — and
+`examples/minecraft/encryption_test.go` runs a key exchange through the proxy to
+hold both to it.
+
+A recording ends there too. The two frames carrying key material are withheld,
+a secret record marks the switch, and nothing after it is filed as a frame —
+ciphertext is not frames, and a capture that says so is still a capture that
+replays.
+
 Standing between an encrypted login as a third party means running two key
 exchanges and holding the client's session credentials. Capture does not need
 it: vanilla only exchanges keys in online mode, and an oracle wants a server

@@ -43,13 +43,41 @@ something.
 So steps 5 and 6 against a compressed session are now a confirmation rather than
 a discovery, in both directions of the threshold.
 
-**Encryption is the honest remainder.** No stub here runs a key exchange, and
-none can without the proxy holding the client's session credentials — which
-`codec.go` declines on purpose. An online-mode login puts the codec into
-`ErrEncrypted` and everything after it into the recording as opaque frames, and
-nothing in this repository has ever watched that happen. That path, and the
-shared-misunderstanding problem the section above describes, are what a person
-with a real client is still holding one for.
+**Encryption was the honest remainder, and is no longer.**
+`examples/minecraft/encryption_test.go` runs the exchange: a stub server that
+asks for a key, a stub client that answers with one, and AES-CFB8 in both
+directions afterwards. The proxy stands between them without taking part, which
+is what it does in front of a real online-mode server.
+
+That run found the claim this document made about it to be false. An online-mode
+login did *not* continue as opaque passthrough — the codec stopped decoding as
+documented, and the framer went on reading length prefixes out of ciphertext,
+took a phantom 13-byte frame, then read a prefix announcing 1.7 MB and parked
+waiting for it. Under the frame limit, so nothing was refused; no error, and the
+one log line was the codec's own notice that it had stopped decoding, which reads
+exactly like the documented behaviour working. The login never completed. Both
+seams now agree on where the stream stops being readable, and the round trip
+across the switch is what holds them to it.
+
+The recorder was wrong in a quieter way and is fixed with it: it was rebuilding a
+length prefix around chunks that never had one, and withholding the occasional
+chunk because ciphertext had produced a packet identifier that looked like key
+material. A capture of an online-mode login is now a login, both halves of the
+exchange withheld, and a secret record marking where the recording stopped being
+able to see — which still replays to its own digest, because a file that stops
+early has to be a recording or it is nothing.
+
+**So an online-mode session is worth taking, and it is worth knowing what it will
+look like.** `verify` will say `ok` over a handful of records, and `trace` will
+report no trajectories, because the capture holds a login and a marker. That is
+the correct answer rather than the empty-trace failure this document's list names
+below: that rule is about a capture that *reached play*, and this one never does.
+A capture whose secret record is missing, or that holds anything after it, is the
+finding.
+
+What a person with a real client is still holding one for is the
+shared-misunderstanding problem the section above describes — every byte in every
+test here, enciphered or not, was produced by this repository's own encoder.
 
 ## What to run
 
@@ -101,6 +129,19 @@ Requirements: a pinned vanilla 1.8.9 server with `online-mode=false`, a real
    capture one login and one walk. This proves the second use of the same
    binary — the packet log `server` therefore never has to grow — and costs a
    few minutes.
+
+8. Optional, and only for somebody holding a paid account: set the vanilla
+   server to `online-mode=true`, log in through the proxy once, and disconnect.
+
+   Expected: the client reaches the world normally — the proxy relays the key
+   exchange without taking part in it — and the capture holds the login, both
+   halves of the exchange withheld, a secret record marking the switch, and
+   nothing after it. `verify` says `ok`; `trace` reports no trajectories.
+
+   This is the one step the stub cannot stand in for, because the client is the
+   half that talks to Mojang. It is optional because what it adds over the stub
+   is a real client's key exchange rather than a real client's gameplay, and
+   because an account is not something a procedure can require.
 
 ## What would count as a failure
 
@@ -333,7 +374,10 @@ after they were moved there, and each reproduced — including both failures.
 
 ### Still open
 
-Nothing from the procedure. Every step has a result above.
+Step 8, which was added after this run and is optional: no online-mode session
+has been recorded against a real server. What it would add over
+`encryption_test.go` is a real client's key exchange rather than a stub's, and it
+needs a paid account. Every other step has a result above.
 
 One thing worth stating plainly about what this evidence cannot outlive: the two
 failing recordings are the only artifacts of the defect, and a capture taken

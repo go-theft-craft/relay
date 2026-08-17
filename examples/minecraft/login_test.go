@@ -435,7 +435,7 @@ func thresholdFrameBytes(t *testing.T, descriptor protocol.Protocol, inForce, an
 
 	limits := loginLimits(t)
 
-	framer, err := minecraft.NewFramer(limits)
+	framer, err := minecraft.NewFramer(nil, limits)
 	if err != nil {
 		t.Fatalf("NewFramer: %v", err)
 	}
@@ -682,7 +682,7 @@ func (s *loginStub) serve(t *testing.T, descriptor protocol.Protocol, conn net.C
 
 	limits := loginLimits(t)
 
-	framer, err := minecraft.NewFramer(limits)
+	framer, err := minecraft.NewFramer(nil, limits)
 	if err != nil {
 		return
 	}
@@ -717,7 +717,7 @@ func (s *loginStub) serve(t *testing.T, descriptor protocol.Protocol, conn net.C
 	}
 
 	if fields.NextState == 1 {
-		s.serveStatus(descriptor, session, framer, conn, reader)
+		serveStatus(descriptor, session, framer, conn, reader)
 
 		return
 	}
@@ -821,7 +821,10 @@ func (s *loginStub) serve(t *testing.T, descriptor protocol.Protocol, conn net.C
 // serveStatus answers the proxy's probe. It is the same exchange the status stub
 // beside this one exists for, kept here because a login stub that cannot be
 // probed is a login stub that is never dialled.
-func (s *loginStub) serveStatus(descriptor protocol.Protocol, session protocol.Session, framer *minecraft.Framer, conn net.Conn, reader *bufio.Reader) {
+//
+// It is a function rather than a method because every stub in this package that
+// wants to be dialled at all has to answer this, whatever it does afterwards.
+func serveStatus(descriptor protocol.Protocol, session protocol.Session, framer *minecraft.Framer, conn net.Conn, reader *bufio.Reader) {
 	for {
 		raw, err := framer.ReadMessage(reader)
 		if err != nil {
@@ -861,7 +864,7 @@ func loginClient(t *testing.T, descriptor protocol.Protocol, addr string) {
 
 	limits := loginLimits(t)
 
-	framer, err := minecraft.NewFramer(limits)
+	framer, err := minecraft.NewFramer(nil, limits)
 	if err != nil {
 		t.Fatalf("NewFramer: %v", err)
 	}
@@ -1003,21 +1006,20 @@ func runLoginProxy(t *testing.T, descriptor protocol.Protocol, upstream string, 
 
 	limits := loginLimits(t)
 
-	framer, err := minecraft.NewFramer(limits)
-	if err != nil {
-		t.Fatalf("NewFramer: %v", err)
-	}
-
 	sink, err := store.Open(filepath.Join(t.TempDir(), "relay.db"), store.WithFlushInterval(20*time.Millisecond))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 
 	p, err := relay.New(relay.Config{
-		Ports:  []relay.PortConfig{{Port: 0, Upstreams: []relay.Upstream{{Addr: upstream}}}},
-		Framer: framer,
-		NewCodec: func(*relay.Session) (relay.Codec, error) {
-			return minecraft.NewCodec(descriptor, limits)
+		Ports: []relay.PortConfig{{Port: 0, Upstreams: []relay.Upstream{{Addr: upstream}}}},
+		NewCodec: func(session *relay.Session) (relay.Codec, error) {
+			return minecraft.NewCodec(session, descriptor, limits)
+		},
+		// A framer per session and per direction, because this one can stop
+		// framing: see minecraft.Framer.
+		NewFramer: func(session *relay.Session, _ relay.Direction) (relay.Framer, error) {
+			return minecraft.NewFramer(session, limits)
 		},
 		Prober: minecraft.Prober{Descriptor: descriptor, Timeout: 5 * time.Second},
 		Sink:   minecraft.NewMultiSink(sink, extra),

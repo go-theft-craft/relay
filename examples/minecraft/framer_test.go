@@ -30,7 +30,7 @@ func testLimits(t *testing.T, options ...protocol.LimitOption) protocol.Limits {
 func newFramer(t *testing.T, limits protocol.Limits) *minecraft.Framer {
 	t.Helper()
 
-	f, err := minecraft.NewFramer(limits)
+	f, err := minecraft.NewFramer(nil, limits)
 	if err != nil {
 		t.Fatalf("NewFramer: %v", err)
 	}

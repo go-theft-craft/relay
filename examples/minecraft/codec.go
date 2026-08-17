@@ -30,6 +30,11 @@ const (
 // ErrEncrypted reports that decoding stopped because the session enabled
 // encryption. It is not a failure: the relay forwards the message as opaque
 // bytes and the proxy keeps working.
+//
+// It keeps working because the framer stops too. This error on its own only says
+// the typed half is gone; a framer still hunting for length prefixes in
+// ciphertext will find them, and the session stops without ever reporting
+// anything further. See Framer.ReadMessage.
 var ErrEncrypted = errors.New("minecraft: the session is encrypted; relaying opaquely")
 
 // Codec decodes frame payloads into typed packets.
@@ -54,13 +59,20 @@ type Codec struct {
 	toServer protocol.Session
 	toClient protocol.Session
 
-	// encrypted latches once the key exchange completes. It never clears,
-	// because a stream cipher does not go back.
-	encrypted bool
+	// link carries the one thing this codec learns that the framers beside it
+	// need: that the key exchange has completed. It latches once and never
+	// clears, because a stream cipher does not go back.
+	link *link
 }
 
 // NewCodec builds the two sessions one proxy connection needs.
-func NewCodec(descriptor protocol.Protocol, limits protocol.Limits) (*Codec, error) {
+//
+// The relay session may be nil, for a codec built outside a relay — a test, or
+// a tool that decodes bytes it got from somewhere else. When it is not nil, the
+// codec publishes what it learns about encryption there, which is how the two
+// framers of the same session find out that they must stop framing. See
+// Encrypted.
+func NewCodec(session *relay.Session, descriptor protocol.Protocol, limits protocol.Limits) (*Codec, error) {
 	// The proxy is the server the client talks to, so its serverbound decoder
 	// takes the server role.
 	toServer, err := descriptor.NewSession(protocol.RoleServer, limits)
@@ -73,7 +85,7 @@ func NewCodec(descriptor protocol.Protocol, limits protocol.Limits) (*Codec, err
 		return nil, fmt.Errorf("minecraft: clientbound session: %w", err)
 	}
 
-	return &Codec{toServer: toServer, toClient: toClient}, nil
+	return &Codec{toServer: toServer, toClient: toClient, link: linkFor(session)}, nil
 }
 
 // Decode implements relay.Codec.
@@ -86,7 +98,7 @@ func (c *Codec) Decode(dir relay.Direction, raw []byte) (any, relay.Descriptor, 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.encrypted {
+	if c.link.encrypted.Load() {
 		return nil, relay.Descriptor{}, ErrEncrypted
 	}
 
@@ -186,11 +198,17 @@ func (c *Codec) advance(dir relay.Direction, packet protocol.Packet) {
 	// want to do it would reach for, has its own worked example in
 	// examples/cipher.
 	//
+	// Latching here rather than in the framers is what makes the two agree: this
+	// is the only place in the example that can see the exchange happen, because
+	// seeing it means decoding a packet, and by the next frame there is nothing
+	// left to decode. The framers read the latch and stop looking for length
+	// prefixes that are no longer there; see Framer.ReadMessage.
+	//
 	// An offline server never sends the request that provokes this response, so
 	// a capture taken against one — which is what the vanilla-behaviour work
 	// needs — never reaches this line at all.
 	if dir == relay.ToServer && packet.State == stateLogin && packet.ID == encryptionResponseID {
-		c.encrypted = true
+		c.link.encrypted.Store(true)
 	}
 
 	transition, ok, err := c.sessionFor(dir).ProposeTransition(packet)
