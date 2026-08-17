@@ -134,6 +134,20 @@ func Hook() relay.Hook { return relay.HookFunc(onTrigger) }
 // inside a socket read at that moment. That is safe, and it is the whole reason
 // the conduit transforms bytes as it hands them out rather than as it buffers
 // them; see relay.Conduit.
+//
+// Three of the four swaps below have to happen before the trigger goes out and
+// one has to happen after, and getting that wrong is not a test failure — it is
+// a client waiting for a line that will never end. No test here catches it,
+// which is worth writing down rather than leaving to be rediscovered: the
+// window is inside this function, on the other pump, and nothing outside can
+// widen it. It ran for weeks passing every local run and failing roughly one CI
+// run in three.
+//
+// The falsifier is by hand, and it is exact. Move the client write swap back
+// below the Inject, put a `time.Sleep(50 * time.Millisecond)` where it used to
+// be, and TestTriggerCrossesInTheClear and TestCiphertextOnTheWire both fail on
+// the client's ten-second read deadline. With the ordering below, the same sleep
+// in the same place changes nothing.
 func onTrigger(_ context.Context, s *relay.Session, m *relay.Message) (relay.Action, error) {
 	if string(m.Raw) != Trigger {
 		return relay.Forward, nil
@@ -142,6 +156,36 @@ func onTrigger(_ context.Context, s *relay.Session, m *relay.Message) (relay.Act
 	upstream, err := transformFor(RoleClient)
 	if err != nil {
 		return relay.Drop, err
+	}
+
+	// The proxy is the server end of the client link and the client end of the
+	// upstream link, which is what keeps each keystream paired with the endpoint
+	// on the other side of it.
+	clientSide, err := transformFor(RoleServer)
+	if err != nil {
+		return relay.Drop, err
+	}
+
+	// Arm the client write side *before* the trigger goes out, for the mirror of
+	// the reason the upstream read side is armed before it — and this is the one
+	// of the four that is easy to get wrong, because the thing it races with is
+	// on the other pump.
+	//
+	// The client switched its own receiving end the instant it sent the trigger,
+	// so everything the proxy writes to it from here on has to be enciphered.
+	// The upstream's acknowledgement is what arrives first, and it does not
+	// arrive here: it arrives on the other pump, which deciphers it, runs the
+	// hooks, and writes it to the client — all of which can happen while this
+	// hook is still executing the lines below. Arming afterwards loses that race
+	// whenever the reply beats the swap, and it loses it silently, because the
+	// acknowledgement then reaches a switched client in the clear and deciphers
+	// into bytes with no line ending in them. The client waits for a line that
+	// cannot arrive.
+	//
+	// A write-only swap is never refused for buffered read bytes, which is what
+	// makes arming this half this early expressible at all.
+	if err := s.Swap(relay.ToClient, relay.Transform{Write: clientSide.Write}); err != nil {
+		return relay.Drop, fmt.Errorf("cipher: arm the client write side: %w", err)
 	}
 
 	// Arm the upstream read side *before* the trigger goes out.
@@ -170,20 +214,15 @@ func onTrigger(_ context.Context, s *relay.Session, m *relay.Message) (relay.Act
 		return relay.Drop, fmt.Errorf("cipher: arm the upstream write side: %w", err)
 	}
 
-	// The proxy is the server end of the client link and the client end of the
-	// upstream link, which is what keeps each keystream paired with the endpoint
-	// on the other side of it.
+	// The client read side comes last, and its lateness costs nothing: this hook
+	// runs on the pump that reads the client, so nothing can be read from it
+	// until the hook returns however early the swap lands.
 	//
-	// The client link is the one that can legitimately be holding unread bytes:
-	// this hook runs on the pump that reads it, and a client that sent past the
-	// boundary has already buffered them. That is the refusal ErrSwapPending
-	// exists for, and it is checked here.
-	clientSide, err := transformFor(RoleServer)
-	if err != nil {
-		return relay.Drop, err
-	}
-	if err := s.Swap(relay.ToClient, clientSide); err != nil {
-		return relay.Drop, fmt.Errorf("cipher: swap the client link: %w", err)
+	// The client link is the one that can legitimately be holding unread bytes,
+	// because a client that sent past the boundary has already buffered them.
+	// That is the refusal ErrSwapPending exists for, and it is checked here.
+	if err := s.Swap(relay.ToClient, relay.Transform{Read: clientSide.Read}); err != nil {
+		return relay.Drop, fmt.Errorf("cipher: arm the client read side: %w", err)
 	}
 
 	// The trigger has already been sent, so the relay must not send it again.

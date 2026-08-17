@@ -85,6 +85,20 @@ version is `0`, a minor bump may break the API.
   exchange. `examples/minecraft/encryption_test.go` now does, and
   `docs/2026-08-17-the-encryption-remainder.md` records what the first run found.
 
+- `examples/cipher` armed the client link's write side after forwarding the
+  trigger, so the upstream's acknowledgement raced it. The acknowledgement
+  crosses on the other pump — deciphered, hooked, and written to the client —
+  which can all happen while the hook is still executing, and a client that has
+  already switched then reads a plaintext line as bytes with no line ending in
+  them and waits for one that cannot arrive.
+
+  It is armed before the trigger goes out now, for the mirror of the reason the
+  upstream read side already was. This is what had been failing CI roughly one
+  run in three, in two different tests of that package, on a ten-second read
+  deadline; no local run ever reproduced it. `onTrigger` carries the manual
+  falsifier, because the window is inside the hook and nothing outside it can be
+  made to widen it reliably.
+
 ## [0.3.0] — 2026-08-17
 
 ### Added
