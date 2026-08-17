@@ -5,7 +5,7 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
-## Unreleased
+## [0.2.1] — 2026-08-17
 
 ### Fixed
 
@@ -89,6 +89,6 @@ protocol, with a `go.mod` that requires nothing outside the standard library.
   the accepted consequence of resolving health lazily rather than at startup.
 - `Sink.RawChunk` is part of the interface but nothing in this version calls
   it: the accept path never wraps a connection for byte-level capture. Wired in
-  the next release; see Unreleased above.
+  `0.2.0` above.
 - `examples/` is a separate module. Nothing it imports reaches a consumer of the
   core.
