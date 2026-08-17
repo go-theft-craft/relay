@@ -9,6 +9,7 @@ import (
 
 	protocol "github.com/go-theft-craft/minecraft-protocol"
 	mccapture "github.com/go-theft-craft/minecraft-protocol/capture"
+	"github.com/go-theft-craft/minecraft-protocol/generated/java/v1_8"
 	"github.com/go-theft-craft/minecraft-protocol/protocols"
 	"github.com/go-theft-craft/minecraft-protocol/wire/java"
 
@@ -284,6 +285,141 @@ func TestARecordingNeverHoldsTheKeyExchangeInTheClear(t *testing.T) {
 	if !withheld {
 		t.Error("no record is marked redacted; the frame was dropped rather than withheld")
 	}
+}
+
+// TestTheFrameThatEnablesCompressionKeepsItsBody is the regression test for the
+// defect the live oracle found: every capture taken from a vanilla server was
+// unreplayable, because vanilla enables compression by default and the frame
+// that enables it was being withheld as though it were key material.
+//
+// The recorder used to ask whether to withhold a frame after it had already
+// applied that frame's own transition to the session it asks. Set compression
+// travels uncompressed and turns compression on behind itself, so the question
+// was asked about an envelope the frame does not wear, the read failed, and the
+// check fails closed — on the one field replay cannot reconstruct. Everything
+// after it then sat in the file wearing an envelope no replay knew about, and
+// the first packet past the threshold decoded as a different packet entirely.
+//
+// No test caught it because the stub upstream the end-to-end tests speak to
+// only ever answers a status ping: nothing in this repository had negotiated
+// compression until a real server did.
+func TestTheFrameThatEnablesCompressionKeepsItsBody(t *testing.T) {
+	t.Parallel()
+
+	descriptor, known := protocols.Resolve("java/1.8.9")
+	if !known {
+		t.Fatal("protocol java/1.8.9 is not registered")
+	}
+
+	recorder, dir := newRecorderFor(t, descriptor)
+	id := openSession(t, recorder)
+
+	recorder.Message(t.Context(), id, decoded(relay.ToServer, "login/login_start", 0, protocol.State("login"), []byte{0x00, 0x06, 't', 'e', 's', 't', 'e', 'r'}))
+
+	// The wire form of set compression at vanilla's default threshold: packet
+	// ID 3, then 256 as a varint.
+	body := []byte{0x03, 0x80, 0x02}
+	compress := decoded(relay.ToClient, "login/compress", 3, protocol.State("login"), body)
+	compress.Decoded = protocol.Packet{
+		State: protocol.State("login"),
+		ID:    3,
+		Name:  "login/compress",
+		Value: &v1_8.LoginClientboundCompress{Threshold: 256},
+	}
+
+	recorder.Message(t.Context(), id, compress)
+	recorder.CloseSession(t.Context(), id)
+
+	records, _ := readAll(t, dir)
+
+	var found bool
+	for _, record := range records {
+		if record.Kind != mccapture.KindPacket || record.Name != "login/compress" {
+			continue
+		}
+
+		found = true
+
+		if record.Redacted {
+			t.Error("the set compression frame was withheld; the capture has lost the threshold and will not replay")
+		}
+		if !bytes.Equal(record.Payload, body) {
+			t.Errorf("the recorded body is %x, want %x", record.Payload, body)
+		}
+	}
+
+	if !found {
+		t.Fatal("the recording holds no set compression packet record at all")
+	}
+}
+
+// TestTheKeyExchangeIsStillWithheldAfterTheReorder guards the other side of the
+// fix. Moving the sensitivity question earlier must not stop it answering: the
+// frames that do carry key material arrive in login before anything has changed
+// the pipeline, so they are judged in exactly the state they always were.
+func TestTheKeyExchangeIsStillWithheldAfterTheReorder(t *testing.T) {
+	t.Parallel()
+
+	descriptor, known := protocols.Resolve("java/1.8.9")
+	if !known {
+		t.Fatal("protocol java/1.8.9 is not registered")
+	}
+
+	recorder, dir := newRecorderFor(t, descriptor)
+	id := openSession(t, recorder)
+
+	recorder.Message(t.Context(), id, decoded(relay.ToServer, "login/login_start", 0, protocol.State("login"), []byte{0x00, 0x06, 't', 'e', 's', 't', 'e', 'r'}))
+
+	secret := []byte{0x01, 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe}
+	recorder.Message(t.Context(), id, decoded(relay.ToClient, "login/encryption_begin", 1, protocol.State("login"), secret))
+	recorder.CloseSession(t.Context(), id)
+
+	var withheld bool
+	for _, record := range mustRecords(t, dir) {
+		if record.Redacted {
+			withheld = true
+		}
+	}
+
+	if !withheld {
+		t.Error("the key exchange was recorded in the clear")
+	}
+}
+
+// mustRecords reads back the single recording a test wrote.
+func mustRecords(t *testing.T, dir string) []mccapture.Record {
+	t.Helper()
+
+	records, _ := readAll(t, dir)
+
+	return records
+}
+
+// newRecorderFor is newRecorder for a test that needs a specific protocol
+// rather than the default one.
+func newRecorderFor(t *testing.T, descriptor protocol.Protocol) (*capture.Recorder, string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	limits := testLimits(t)
+
+	framer, err := java.NewFramer(limits)
+	if err != nil {
+		t.Fatalf("NewFramer: %v", err)
+	}
+
+	recorder, err := capture.NewRecorder(capture.Options{
+		Dir:        dir,
+		Descriptor: descriptor,
+		Limits:     limits,
+		Framer:     framer,
+		OnError:    func(err error) { t.Errorf("recorder reported: %v", err) },
+	})
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+
+	return recorder, dir
 }
 
 // decoded builds what relay hands a sink for a frame the codec understood.

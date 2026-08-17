@@ -20,6 +20,26 @@ version is `0`, a minor bump may break the API.
   direction too, because the same leading byte means different packets arriving
   from each peer.
 
+### Fixed
+
+- `examples/minecraft/capture` withheld the frame that enables compression as
+  though it carried key material, so every recording taken against a vanilla
+  server — which compresses by default — lost the threshold and would not replay.
+  The sensitivity question is now asked before the frame's own transition is
+  applied.
+
+  The frame travels uncompressed and turns compression on behind itself, so
+  asking afterwards asked about an envelope it does not wear; the read failed and
+  the check fails closed, on the one field replay cannot reconstruct. Everything
+  past the threshold then sat in the file wearing an envelope no replay knew
+  about, and the first packet after it decoded as a different packet entirely.
+
+  Nothing caught this because the stub upstream the end-to-end tests speak to
+  only answers a status ping: until a real 1.8.9 server was put behind the proxy,
+  nothing in this repository had ever negotiated compression. The live procedure
+  in `docs/verification/2026-08-17-capture-oracle.md` found it on its first run,
+  and the same document records the fix replaying at vanilla's default threshold.
+
 ## [0.2.1] — 2026-08-17
 
 ### Fixed

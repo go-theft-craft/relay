@@ -180,7 +180,7 @@ func (r *Recorder) Message(ctx context.Context, id int64, record relay.MessageRe
 	}
 
 	entry.frame++
-	before, after := entry.states(record)
+	before := entry.beforeState(record)
 
 	frame, err := r.opts.Framer.BuildFrame(record.Raw)
 	if err != nil {
@@ -190,7 +190,17 @@ func (r *Recorder) Message(ctx context.Context, id int64, record relay.MessageRe
 	}
 
 	wire := frame.WireBytes()
+
+	// The sensitivity question is asked before the transition is applied, and
+	// the order is load-bearing rather than incidental. A frame that changes the
+	// pipeline has to be judged under the pipeline it arrived on: a set
+	// compression packet travels uncompressed and enables compression for
+	// everything after it, so asking afterwards asks about an envelope the frame
+	// does not wear, the read fails, and the check fails closed on a frame that
+	// is not a secret and that the capture cannot do without.
 	redacted := entry.withhold(before, dir, record.Raw)
+
+	after := entry.advance(record, before)
 
 	raw := protocol.Observation{
 		Frame:       entry.frame,
@@ -298,45 +308,56 @@ func (r *Recorder) lookup(id int64) *recording {
 	return r.sessions[id]
 }
 
-// states reports the connection state either side of this frame.
+// beforeState reports the state this frame belonged to.
 //
-// A decoded packet carries the state it belonged to, which is the before state
-// by definition — the recorder's own running state is a fallback for frames
-// nobody could decode. The after state comes from asking the protocol what the
-// packet implies, the same question the relay's codec asks, so a login success
-// records the move into play rather than claiming the connection never left
-// login. Replay follows those recorded transitions, so getting this wrong
-// produces a file that will not replay through the very packets that matter.
+// A decoded packet carries it by definition; the recorder's own running state is
+// the fallback for a frame nobody could decode.
 //
 // It must be called with the recording's mutex held.
-func (e *recording) states(record relay.MessageRecord) (before, after protocol.State) {
+func (e *recording) beforeState(record relay.MessageRecord) protocol.State {
 	packet, ok := record.Decoded.(protocol.Packet)
 	if !ok || packet.State == "" {
-		return e.state, e.state
+		return e.state
 	}
 
-	before = packet.State
-	after = before
+	return packet.State
+}
 
-	if e.sensitiveSession == nil {
-		return before, after
+// advance applies whatever transition this frame implies and reports the state
+// on its far side.
+//
+// The question asked is the same one the relay's codec asks, so a login success
+// records the move into play rather than claiming the connection never left
+// login. Replay follows the recorded transitions, so getting this wrong produces
+// a file that will not replay through the very packets that matter.
+//
+// It is separate from beforeState because it mutates: applying a transition can
+// change the pipeline as well as the state, and the sensitivity check has to run
+// against the session as the frame found it. Both halves used to be one call,
+// and the set compression frame was redacted out of every capture as a result.
+//
+// It must be called with the recording's mutex held.
+func (e *recording) advance(record relay.MessageRecord, before protocol.State) protocol.State {
+	packet, ok := record.Decoded.(protocol.Packet)
+	if !ok || packet.State == "" || e.sensitiveSession == nil {
+		return before
 	}
 
 	e.sensitiveSession.SetState(before)
 
 	transition, proposed, err := e.sensitiveSession.ProposeTransition(packet)
 	if err != nil || !proposed {
-		return before, after
+		return before
 	}
 
 	if e.sensitiveSession.ValidateTransition(transition) == nil {
 		e.sensitiveSession.ApplyTransition(transition)
 	}
 	if transition.State != nil {
-		after = *transition.State
+		return *transition.State
 	}
 
-	return before, after
+	return before
 }
 
 // withhold reports whether this frame's bytes must be kept out of the file.
@@ -347,10 +368,13 @@ func (e *recording) states(record relay.MessageRecord) (before, after protocol.S
 // reported, so an opaque frame is judged in the state it actually arrived in
 // rather than assumed harmless.
 //
-// The oracle session never has compression applied, which is safe only because
-// the sensitive frames all precede the packet that enables it. A protocol that
-// compressed before it exchanged keys would need the control mirrored here, and
-// the check would silently start answering about the wrong bytes.
+// The session this asks does follow the connection's pipeline, because advance
+// applies compression to it exactly when the wire enables it — so the bytes
+// handed here are read under the envelope they actually wear. What makes that
+// work is that the question is asked before the frame's own transition is
+// applied. A set compression packet travels uncompressed and turns compression
+// on behind itself; judged afterwards it cannot be read, and the fail-closed
+// branch below withholds the one field replay needs.
 //
 // It must be called with the recording's mutex held.
 func (e *recording) withhold(state protocol.State, dir protocol.Direction, payload []byte) bool {
