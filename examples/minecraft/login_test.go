@@ -1016,7 +1016,7 @@ func runLoginProxy(t *testing.T, descriptor protocol.Protocol, upstream string, 
 	p, err := relay.New(relay.Config{
 		Ports:  []relay.PortConfig{{Port: 0, Upstreams: []relay.Upstream{{Addr: upstream}}}},
 		Framer: framer,
-		NewCodec: func() (relay.Codec, error) {
+		NewCodec: func(*relay.Session) (relay.Codec, error) {
 			return minecraft.NewCodec(descriptor, limits)
 		},
 		Prober: minecraft.Prober{Descriptor: descriptor, Timeout: 5 * time.Second},

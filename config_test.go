@@ -191,7 +191,7 @@ func TestDefaultSessionErrorHandlerDoesNotPanic(t *testing.T) {
 func TestConfigRejectsBothCodecForms(t *testing.T) {
 	cfg := minimalConfig()
 	cfg.Codec = &countingCodec{}
-	cfg.NewCodec = func() (Codec, error) { return &countingCodec{}, nil }
+	cfg.NewCodec = func(*Session) (Codec, error) { return &countingCodec{}, nil }
 
 	if err := cfg.validate(); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("validate() with both Codec and NewCodec = %v, want ErrInvalidConfig", err)
@@ -203,7 +203,7 @@ func TestConfigRejectsBothCodecForms(t *testing.T) {
 // broken.
 func TestConfigRejectsBothFramerForms(t *testing.T) {
 	cfg := minimalConfig()
-	cfg.NewFramer = func(Direction) (Framer, error) { return lineFramer{}, nil }
+	cfg.NewFramer = func(*Session, Direction) (Framer, error) { return lineFramer{}, nil }
 
 	if err := cfg.validate(); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("validate() with both Framer and NewFramer = %v, want ErrInvalidConfig", err)
@@ -215,7 +215,7 @@ func TestConfigRejectsBothFramerForms(t *testing.T) {
 func TestConfigAcceptsNewFramerAlone(t *testing.T) {
 	cfg := minimalConfig()
 	cfg.Framer = nil
-	cfg.NewFramer = func(Direction) (Framer, error) { return lineFramer{}, nil }
+	cfg.NewFramer = func(*Session, Direction) (Framer, error) { return lineFramer{}, nil }
 
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("validate() with only NewFramer = %v, want nil", err)

@@ -250,7 +250,7 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 	s := newSession(ctx, &p.cfg, client, nil, info, 0)
 
 	if p.cfg.NewCodec != nil {
-		codec, err := p.cfg.NewCodec()
+		codec, err := p.cfg.NewCodec(s)
 		if err != nil {
 			p.cfg.OnSessionError(s, fmt.Errorf("relay: build the session codec: %w", err))
 
@@ -262,7 +262,7 @@ func (p *Proxy) serve(ctx context.Context, port int, client net.Conn) {
 
 	if p.cfg.NewFramer != nil {
 		for _, dir := range []Direction{ToServer, ToClient} {
-			framer, err := p.cfg.NewFramer(dir)
+			framer, err := p.cfg.NewFramer(s, dir)
 			if err != nil {
 				p.cfg.OnSessionError(s, fmt.Errorf("relay: build the %s session framer: %w", dir, err))
 

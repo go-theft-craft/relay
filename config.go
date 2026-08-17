@@ -105,7 +105,13 @@ type Config struct {
 	// connection states has a state machine per connection, and often a decoder
 	// per direction as well, so one shared instance would have every client
 	// advancing everyone else's state. Set this or Codec, not both.
-	NewCodec func() (Codec, error)
+	//
+	// It receives the session so that a codec can attach per-session state the
+	// rest of the consumer's code can find again through Session.Get. The
+	// session exists but has no upstream yet: it has been given its client
+	// connection and nothing else, so a constructor may record it and must not
+	// read anything that a dial would have filled in.
+	NewCodec func(*Session) (Codec, error)
 
 	// NewFramer builds a Framer per session and per direction, for a protocol
 	// whose message boundaries are not a pure function of the bytes.
@@ -123,7 +129,14 @@ type Config struct {
 	// the client connection and writes the upstream one. Set this or Framer,
 	// not both. A session whose framer cannot be built is reported to
 	// OnSessionError and dropped, since there is no framing without it.
-	NewFramer func(Direction) (Framer, error)
+	//
+	// It receives the session for the same reason NewCodec does, and for one
+	// more that only framing has: the two framers of a session cannot otherwise
+	// see each other, nor the codec built beside them. A protocol that
+	// renegotiates on one direction and frames on the other has nowhere to put
+	// what it learned, and one that gives up on framing has no way to tell the
+	// rest of the consumer to stop injecting. Session.Set is that place.
+	NewFramer func(*Session, Direction) (Framer, error)
 
 	// CaptureRaw records every byte crossing the client connection to
 	// Sink.RawChunk, below any framing and below any mid-stream transform.

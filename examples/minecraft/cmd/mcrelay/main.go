@@ -179,7 +179,7 @@ func run(args []string) error {
 		// sessions and a state machine, all of which belong to one connection.
 		// Sharing a single instance would have every client advancing everyone
 		// else's handshake.
-		NewCodec: func() (relay.Codec, error) {
+		NewCodec: func(*relay.Session) (relay.Codec, error) {
 			return minecraft.NewCodec(descriptor, limits)
 		},
 		// Health that means the server answered, rather than that something

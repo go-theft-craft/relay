@@ -645,7 +645,7 @@ func TestProxyBuildsACodecPerSession(t *testing.T) {
 
 	p, _, _ := runProxy(t, Config{
 		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
-		NewCodec: func() (Codec, error) {
+		NewCodec: func(*Session) (Codec, error) {
 			built.Add(1)
 
 			return &countingCodec{}, nil
@@ -675,7 +675,7 @@ func TestProxyReportsACodecThatCannotBeBuilt(t *testing.T) {
 
 	p, _, sessionErrs := runProxy(t, Config{
 		Ports:    []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
-		NewCodec: func() (Codec, error) { return nil, errors.New("no codec today") },
+		NewCodec: func(*Session) (Codec, error) { return nil, errors.New("no codec today") },
 	})
 
 	conn := dial(t, onlyAddr(t, p))
@@ -705,7 +705,7 @@ func TestProxyBuildsAFramerPerSessionAndDirection(t *testing.T) {
 
 	p, _, _ := runProxy(t, Config{
 		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
-		NewFramer: func(dir Direction) (Framer, error) {
+		NewFramer: func(_ *Session, dir Direction) (Framer, error) {
 			mu.Lock()
 			built = append(built, dir)
 			mu.Unlock()
@@ -755,7 +755,7 @@ func TestProxyFramerPerDirectionFramesEachWayItsOwnWay(t *testing.T) {
 
 	p, _, _ := runProxy(t, Config{
 		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
-		NewFramer: func(dir Direction) (Framer, error) {
+		NewFramer: func(_ *Session, dir Direction) (Framer, error) {
 			if dir == ToClient {
 				return delimFramer{delim: ';'}, nil
 			}
@@ -783,7 +783,7 @@ func TestProxyReportsAFramerThatCannotBeBuilt(t *testing.T) {
 
 	p, _, sessionErrs := runProxy(t, Config{
 		Ports:     []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
-		NewFramer: func(Direction) (Framer, error) { return nil, errors.New("no framer today") },
+		NewFramer: func(*Session, Direction) (Framer, error) { return nil, errors.New("no framer today") },
 	})
 
 	conn := dial(t, onlyAddr(t, p))
@@ -807,7 +807,7 @@ func TestProxyReportsANilFramerFromNewFramer(t *testing.T) {
 
 	p, _, sessionErrs := runProxy(t, Config{
 		Ports:     []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
-		NewFramer: func(Direction) (Framer, error) { return nil, nil },
+		NewFramer: func(*Session, Direction) (Framer, error) { return nil, nil },
 	})
 
 	conn := dial(t, onlyAddr(t, p))
@@ -1077,5 +1077,60 @@ func TestProxyCaptureRecordsPostTransformBytes(t *testing.T) {
 	}
 	if !bytes.Equal(toClient, flipped([]byte("after\n"))) {
 		t.Fatalf("captured to_client %q, want the transformed bytes — the capture must sit below the transform", toClient)
+	}
+}
+
+// TestProxySessionScopedConstructorsShareState is the property the session
+// argument buys: the two framers of a session, and the codec built beside them,
+// can find each other.
+//
+// Nothing else in the API joins them. A framer that learns something on one
+// direction — a negotiated encoding, a decision to stop framing at all — has
+// nowhere else to put it, and a consumer that must react to it has no other way
+// to hear about it.
+func TestProxySessionScopedConstructorsShareState(t *testing.T) {
+	up := newEchoUpstream(t)
+
+	const key = "shared"
+
+	seen := make(chan int, 4)
+
+	p, _, _ := runProxy(t, Config{
+		Ports: []PortConfig{{Port: 0, Upstreams: []Upstream{{Addr: up.addr()}}}},
+		NewCodec: func(s *Session) (Codec, error) {
+			// The codec is built first, so it is where the shared thing starts.
+			s.Set(key, new(atomic.Int64))
+
+			return &countingCodec{}, nil
+		},
+		NewFramer: func(s *Session, _ Direction) (Framer, error) {
+			shared, ok := s.Get(key)
+			if !ok {
+				return nil, errors.New("framer could not see the codec's state")
+			}
+
+			counter, ok := shared.(*atomic.Int64)
+			if !ok {
+				return nil, errors.New("shared state was not what the codec left")
+			}
+
+			seen <- int(counter.Add(1))
+
+			return lineFramer{}, nil
+		},
+	})
+
+	conn := dial(t, onlyAddr(t, p))
+	writeLine(t, conn, "hello")
+
+	if got := readLine(t, bufio.NewReader(conn)); got != "hello" {
+		t.Fatalf("got %q, want hello", got)
+	}
+
+	// Both framers incremented the same counter, so they saw 1 and 2 rather
+	// than 1 and 1.
+	first, second := <-seen, <-seen
+	if first+second != 3 {
+		t.Errorf("framers saw %d and %d, want 1 and 2 — they did not share one counter", first, second)
 	}
 }

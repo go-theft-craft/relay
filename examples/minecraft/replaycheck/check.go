@@ -81,7 +81,8 @@ func Check(ctx context.Context, path string) (Result, error) {
 		return Result{Path: path}, fmt.Errorf("replaycheck: read header: %w", err)
 	}
 
-	player, err := replay.New(reader,
+	player, err := replay.New(
+		reader,
 		replay.WithMode(replay.ModeFast),
 		replay.WithResolver(replay.ResolverFunc(protocols.Resolve)),
 	)
