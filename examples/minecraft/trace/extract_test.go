@@ -45,13 +45,22 @@ type recorder struct {
 func newRecorder(t *testing.T) *recorder {
 	t.Helper()
 
-	session, err := v1_8.Protocol().NewSession(protocol.RoleServer, testLimits(t))
+	return newRecorderFor(t, v1_8.Protocol())
+}
+
+// newRecorderFor builds a recorder for one protocol. The version is a parameter
+// because the extractor is one implementation per version and each one has to
+// be driven by that version's own encoder.
+func newRecorderFor(t *testing.T, descriptor protocol.Protocol) *recorder {
+	t.Helper()
+
+	session, err := descriptor.NewSession(protocol.RoleServer, testLimits(t))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
 	session.SetState(protocol.State("play"))
 
-	client, err := v1_8.Protocol().NewSession(protocol.RoleClient, testLimits(t))
+	client, err := descriptor.NewSession(protocol.RoleClient, testLimits(t))
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -495,13 +504,22 @@ func TestACaptureThatNeverReachedPlayIsNotAFailure(t *testing.T) {
 	}
 }
 
+// unregistered is a descriptor for a version no rule set reads. It stands for
+// the next protocol to exist rather than for one that does: 47 and 775 both
+// have rule sets now, so refusing a real version would only test that the
+// registry is incomplete.
+type unregistered struct{ protocol.Protocol }
+
+func (unregistered) ID() string { return "java/0.0.0" }
+
 // TestAnotherProtocolIsRefused states the boundary rather than guessing across
-// it. Decoding 775 with 47's packet identifiers and scales would produce
-// numbers that look like a trajectory and are not one.
+// it. Decoding one version with another's packet identifiers and scales would
+// produce numbers that look like a trajectory and are not one.
 func TestAnotherProtocolIsRefused(t *testing.T) {
 	t.Parallel()
 
-	if _, err := trace.Extract(protocols.Default(), testLimits(t), nil); !errors.Is(err, trace.ErrUnsupportedProtocol) {
-		t.Fatalf("Extract on %s = %v, want ErrUnsupportedProtocol", protocols.Default().ID(), err)
+	descriptor := unregistered{Protocol: protocols.Default()}
+	if _, err := trace.Extract(descriptor, testLimits(t), nil); !errors.Is(err, trace.ErrUnsupportedProtocol) {
+		t.Fatalf("Extract on %s = %v, want ErrUnsupportedProtocol", descriptor.ID(), err)
 	}
 }
