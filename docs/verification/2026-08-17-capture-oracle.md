@@ -482,7 +482,11 @@ The dump the numbers come from was produced by a throwaway decoder reading the
 generated 775 packet types directly, with no involvement from the trace
 extractor, so the extractor cannot have agreed with itself.
 
-### The finding: 775 velocities do not decode
+### The finding: 775 velocities did not decode, and why
+
+**Diagnosed and fixed the same day.** The section below is what was observed,
+kept as written because the shape of the defect is the point. The cause is at
+the end.
 
 Positions came out right. Velocities did not, and the evidence is strong enough
 to state plainly:
@@ -526,12 +530,38 @@ velocity bytes are `f9 ff 86 64 ff fd`. The zero case does match: an item
 summoned with no motion encodes as the single byte `00`, which is what
 `WriteLPVec3` produces.
 
-It is recorded rather than fixed here. It belongs to `minecraft-protocol`, and
-it does not touch what M9.1b claims: positions arrive as `float64` fields and
-`int16` deltas, neither of which goes through that codec. What it does mean is
-that **the `Velocity` field of a 775 sample is not yet evidence**, and M9.2,
-which verifies dropped-item and arrow motion, must not rest on it until the
-codec is checked against vanilla's own encoder.
+**The cause: byte order, in both directions at once.**
+`net/minecraft/network/LpVec3.java` in the decompiled 26.1.2 server writes the
+packed vector as `writeByte(buffer)`, `writeByte(buffer >> 8)`,
+`writeInt(buffer >> 16)` — and Netty's `writeInt` is big endian. This project's
+`wire/java` wrote and read all forty-eight bits little endian. Wrong in both
+directions is why every round-trip test passed: the package agreed with itself
+about a layout no server uses. The low sixteen bits happen to match, which is
+why the first two bytes of our encoding of `{0.1, 0, 0}` and vanilla's were
+identical and the last four were reversed.
+
+Fixed in `minecraft-protocol` as `fix(java): read the byte order vanilla writes
+an LPVec3 in`, with a test that reads the captured velocity fields above and
+re-encodes them byte for byte. Re-running the extraction over the same recording
+with the fix in place:
+
+```
+arrow 73  velocity {0.1, 0, 0}       summoned with Motion:[0.10d,0.0d,0.0d]
+arrow 77  velocity {0, 0, 0.05}      summoned with Motion:[0.0d,0.0d,0.05d]
+item 105  velocity {0.102, 0.2, 0.203}   a dropped item: vanilla tosses at y = 0.2
+slime 27  velocity {-0.194, 0.333, 0.040} a jump
+slime 66  velocity {-0.002, -0.078, 0.005} falling
+```
+
+Every one of those is the number the game states or a value physics explains,
+where before they were repeats of 0.9942 and 0.8588.
+
+`relay` pins released versions of `minecraft-protocol`, so this repository picks
+the fix up at the next release rather than from the working tree; the run above
+was made with a temporary `replace` and no such directive is committed. Until
+that release, a 775 sample's `Velocity` read by a build of this repository is
+still the old number. Positions were never affected: they arrive as `float64`
+fields and `int16` deltas, neither of which goes through that codec.
 
 ### What this run does not cover
 
