@@ -383,3 +383,156 @@ One thing worth stating plainly about what this evidence cannot outlive: the two
 failing recordings are the only artifacts of the defect, and a capture taken
 before the fix cannot be repaired. If they are lost, the defect becomes a claim
 in a document rather than something anybody can re-run.
+
+---
+
+## Protocol 775
+
+**Status: RUN 2026-08-18 against a pinned vanilla 26.1.2 server, with a headless
+client rather than a vanilla one.** The gate passed, the relative-move scale was
+measured rather than assumed, and one finding came out of it that belongs to
+`minecraft-protocol`.
+
+Everything in this section is the 775 half of M9.1b. The procedure is the one
+above with two changes: `-protocol` is left at its default, since 775 is it, and
+the client was `headless-minecraft`'s rather than Mojang's.
+
+### What was running
+
+| Piece | Identity |
+| --- | --- |
+| Server | vanilla 26.1.2, `server/executable.jar` prepared by `mcreference`, `sha256 4723380bd2a0a0206719b50f2e390383afdaf82b0a76a0d573baf788e6aa3e86` |
+| Server configuration | offline mode, flat world, seed `orbit1889`, compression at vanilla's default 256, port 25666 |
+| Proxy | `mcrelay` from `409e270`, `-protocol java/26.1 -upstream 127.0.0.1:25666 -listen 25665 -record ./recordings` |
+| Client | `headless-minecraft`'s client, standing still |
+
+The entities that carry the measurement were summoned from the server console,
+so their starting positions are exact and stated by the operator rather than
+inferred:
+
+```
+summon minecraft:arrow -4.5 -55.0 9.5 {Motion:[0.10d,0.0d,0.0d]}
+summon minecraft:arrow -4.5 -52.0 11.5 {Motion:[0.0d,0.0d,0.05d]}
+summon minecraft:item  -3.5 -55.0 9.5 {Item:{id:"minecraft:stone",count:1}}
+```
+
+### The gate
+
+```
+mcrelay verify ./recordings/*.mccap
+ok 20260818-073841-001.mccap: 2276 records, replays to its own digest
+ok 20260818-074339-002.mccap: 192 records, replays to its own digest
+ok 20260818-074505-003.mccap: 230 records, replays to its own digest
+```
+
+That is M9.1b's gate: a 775 recording replays deterministically from a real
+26.1.2 server, through the same codec, sink, and replay path the 47 lane uses.
+
+### The trajectories
+
+`mcrelay trace` on the first recording returns eight, and they are the right
+eight:
+
+```
+1   player  1 sample    (-4.5, -60, 9.5)
+6   living  134         (14.5, -60, 28.5)  -> (7.858, -59.879, 32.785)
+27  living  146         (15.5, -60, 28.5)  -> (-3.963, -59.58, 10.941)
+66  living  68          (14.5, -60, 28.5)  -> (12.647, -60, 32.08)
+73  arrow   22          (-4.5, -55, 9.5)   -> (-3.155, -59.95, 9.5)
+76  item    2           (-3.5, -55, 9.5)   -> (-3.5, -55, 9.5)
+77  arrow   20          (-4.5, -52, 11.5)  -> (-4.5, -59.95, 12.315)
+105 item    3           (-4.559, -58.68, 9.403) -> (-3.302, -60, 11.9)
+```
+
+The families come from 26.1's own entity registry, because 775 consolidated 47's
+several spawn packets into one carrying a type ID. The three `living` traces are
+slimes, which a flat world spawns whatever `spawn-monsters` says. The player's
+own trace holds one sample because the client stood still: a 775 client that is
+not moving sends the rotation-only packet, which carries no position.
+
+### The relative-move scale, measured
+
+The constant this section exists to settle is `relMoveScale` in
+`examples/minecraft/trace/v26_1.go`. It was measured, not read out of a
+document.
+
+Both arrows fell onto the same flat surface and each reported its whole fall as
+a single relative move, from starting heights three blocks apart:
+
+```
+arrow at y = -55:  DY = -20275
+arrow at y = -52:  DY = -32563
+```
+
+Landing on one surface means the difference in units is the difference in
+blocks:
+
+```
+(32563 - 20275) / 3 = 4096 units per block
+```
+
+The check that it is right rather than merely self-consistent: both landings
+then resolve to y = -59.949951171875, the same number from two different
+heights. Protocol 47's scale is 32 with an `int8` delta; reading a 775 delta at
+47's scale would have shrunk every relative move by a factor of 128, which is
+the kind of error that produces a trajectory of the right shape and the wrong
+size.
+
+The dump the numbers come from was produced by a throwaway decoder reading the
+generated 775 packet types directly, with no involvement from the trace
+extractor, so the extractor cannot have agreed with itself.
+
+### The finding: 775 velocities do not decode
+
+Positions came out right. Velocities did not, and the evidence is strong enough
+to state plainly:
+
+- Values repeat to sixteen digits across unrelated entities minutes apart —
+  `0.9942013062320698` and `0.8588170664713421` appear again and again. No real
+  velocity does that.
+- A `packet_entity_velocity` for a slime disagrees with the
+  `packet_sync_entity_position` that follows it for the same entity, whose own
+  `float64` delta is physically plausible.
+- Nothing fails while this happens: every one of the 1098 play records in the
+  session decoded without error.
+
+The suspect is the `lpVec3` codec in `minecraft-protocol/wire/java/vector.go`.
+Its encoder and decoder agree with each other exactly, so a round-trip test
+passes while a vector written by vanilla is read as something else — the same
+shape of defect as the compression bug above, and the reason this document
+exists. `lpVec3` is six bytes without its continuation, and so is the three-`i16`
+encoding it replaced, so a mis-specified field would consume exactly the right
+number of bytes and produce a valid-looking vector.
+
+It is recorded rather than fixed here. It belongs to `minecraft-protocol`, and
+it does not touch what M9.1b claims: positions arrive as `float64` fields and
+`int16` deltas, neither of which goes through that codec. What it does mean is
+that **the `Velocity` field of a 775 sample is not yet evidence**, and M9.2,
+which verifies dropped-item and arrow motion, must not rest on it until the
+codec is checked against vanilla's own encoder.
+
+### What this run does not cover
+
+No real vanilla 26.1.2 client was used, because none is installed on this
+machine. The wire format is settled by the server's own frames, which is what
+every number above comes from, but the packet mix a real client produces —
+inventory, digging, chat, animation, and a player trajectory with more than one
+sample in it — is not exercised. That is the same gap M9.1 closed for 1.8.9 by
+sitting down with a client for an evening, and it stays open here.
+
+Two smaller oddities, recorded because the next person will hit them:
+
+- Only the first session after a server start saw entity traffic. The second and
+  third connected, joined, and received about 200 records each with no spawns.
+  The client logs `the session was placed and has loaded no chunk` in those
+  runs. Not diagnosed; it did not block the measurement, which the first session
+  carries.
+- Slimes appear on a flat world with `spawn-monsters=false`. They are what the
+  three `living` traces are.
+
+### Where the recordings are
+
+`../oracle-evidence/2026-08-18-relay-775/`, with the server log and
+configuration, the raw packet dump the scale was measured from, the extractor's
+JSON output, a `SHA256SUMS` over all of it, and the `mcrelay` binary built from
+`409e270` that the verdicts were taken with.
