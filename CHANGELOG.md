@@ -5,6 +5,23 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+## [Unreleased]
+
+### Fixed
+
+- `examples/` takes `minecraft-protocol` v0.6.0, which carries the `LPVec3` byte
+  order fix `0.4.2` recorded without being able to use. A 775 velocity read here
+  is the motion again rather than the packed value: re-extracting the pinned
+  measurement recording gives the two summoned arrows `{0.1, 0, 0}` and
+  `{0, 0, 0.05}`, which is what they were summoned with, and a dropped item
+  `{0.102, 0.2, 0.203}`, which is vanilla's 0.2 toss.
+
+  The release also carries a login fix — a client that wrote its encryption
+  response before installing its cipher read the server's first encrypted bytes
+  as plaintext, so a refused online login reported a nonsense frame length
+  instead of its reason. Nothing here logs in online, so it costs this
+  repository nothing either way.
+
 ## [0.4.2] — 2026-08-18
 
 `examples/` and the documents beside it again: the core module is unchanged from
