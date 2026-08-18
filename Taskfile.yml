@@ -47,6 +47,19 @@ tasks:
       # thing worth waiting for, not the default ten minutes of nothing.
       - go test -race -timeout 120s -covermode=atomic -coverprofile=coverage.out {{.CLI_ARGS | default "./..."}}
 
+  test:fast:
+    desc: Run unit tests without the race detector, for the edit loop
+    # The same tests as test. The race detector's instrumented rebuild is what
+    # separates them, and every source edit invalidates it — measured at 23
+    # seconds against 2 on a sibling tree. Run this while editing and test
+    # before committing; verify still runs the race lane, which is the only one
+    # that finds the failure you cannot reproduce on purpose.
+    #
+    # The timeout carries over for the reason above: a run that reaches two
+    # minutes here has deadlocked.
+    cmds:
+      - go test -timeout 120s {{.CLI_ARGS | default "./..."}}
+
   test:examples:
     desc: Run the example module's tests
     dir: examples
