@@ -9,6 +9,11 @@ of the framework. The `replace` directive at the top of `go.mod` points at the
 working tree above; `task deps:check` fails the build if it ever drifts into the
 core.
 
+Being a separate module is also why nothing here is tagged: a tag on this
+repository sets the version a consumer of the core resolves. Changes are
+recorded in [`CHANGELOG.md`](CHANGELOG.md) beside this file, dated rather than
+versioned.
+
 ```
 devbox run -- task test:examples
 ```

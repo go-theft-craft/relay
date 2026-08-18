@@ -5,6 +5,13 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+This file and the tags beside it describe the **core module**. `examples/` is a
+separate module and its changes are recorded in
+[`examples/CHANGELOG.md`](examples/CHANGELOG.md), untagged: a tag on this
+repository sets the version a consumer of `relay` resolves, and `0.4.1` through
+`0.4.3` moved that version three times without changing a byte of what it names.
+The examples are worth a record, not a release.
+
 ## [0.4.3] — 2026-08-18
 
 `examples/` once more; the core module is unchanged from `0.4.0`.
