@@ -1,5 +1,21 @@
 # The two questions the plan parked
 
+> **Status: both questions answered; this is the record of the problem, not of
+> the state (2026-08-18).** The `Sink` contract is now enforced rather than
+> stated: [enforce the sink contract](2026-08-17-enforce-the-sink-contract.md)
+> built `sinkpump.go` — one bounded queue and one goroutine per session, with
+> `SinkOverflowBlock`, `Drop`, and `EndSession` — and
+> [the live sink-policy run](verification/2026-08-18-sink-policy-live.md)
+> settled which queue survives by putting both in front of a real 1.8.9 server
+> onto a deliberately slow disk. The decision: the recorder keeps its own queue,
+> and the core's stays out of the capture path. The un-swapping question below
+> is answered too, and its answer has not changed.
+>
+> One finding from that run outlives both: `mcrelay verify` digests what was
+> written rather than what crossed the wire, so a recording that lost 16% of its
+> records passed the gate. Dropping is never the policy in front of a recorder,
+> and the format still cannot say a frame is missing.
+
 `docs/2026-08-16-relay-proxy-framework.md` ends by naming two things to watch on
 the first real migration, and deliberately leaves both open:
 
