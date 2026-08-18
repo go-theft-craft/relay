@@ -154,7 +154,9 @@ write is a disk delivering roughly 18 KB/s at these flush sizes, and the session
 kept going for its full 36 seconds. Two seconds per write halves that and the
 recorder gives up. The threshold is not a latency: it is the point where
 sustained write bandwidth falls under what the session produces, which is what a
-bounded queue is supposed to do and not a number to tune against.
+bounded queue is supposed to do and not a number to tune against. It is not the
+general rule either — the tail arms below hold this bandwidth constant and end
+sessions anyway.
 
 **The queue buys about nine seconds, and the disk's slowness does not change
 that.** Failure came 9.1 s into the session at two seconds per write and 8.5 s at
@@ -173,14 +175,55 @@ Every arm that survived ran to the bot's own exit, and every arm that failed
 left a recording that replays to its own digest. A capture stopped by a slow
 disk is still a capture.
 
+## The tail, measured
+
+A uniform delay says a disk is slow. It does not say what a slow disk is like:
+real storage answers quickly nearly always and occasionally stops, and the
+paragraph above ends by admitting that a tail is what usually ends sessions. So
+`slowfs` grew `-tail-every`, which makes every Nth write take a long delay
+instead of the short one, and the arms below all hold the *mean* at roughly one
+second per write — the uniform delay that survived a full session — while
+changing the shape.
+
+| Stall | Mean | Stalls in the session | Outcome |
+| --- | --- | --- | --- |
+| uniform 1 s | 1.00 s | — | ok, 5260 records, full session |
+| 3 s every 3rd write | 1.01 s | 7 | ok, 3608 records, full session |
+| 6 s every 6th write | 1.02 s | 2 | ok, 1880 records, full session |
+| 6 s every 6th, again | 1.02 s | 5 | ok, 6106 records, full session |
+| 9 s every 9th write | 1.02 s | 1 | **ended inside the first stall**; ok, 941 records |
+| 15 s every 15th write | 1.02 s | 1 | **ended inside the first stall**; ok, 1363 records |
+
+**The mean is not what decides.** Every row has the same one second per write.
+The uniform arm ran to the bot's own exit and so did stalls of three and six
+seconds, repeatedly — seven of them in one arm, five in another, with the queue
+draining in between each time. A single nine-second stall ended the session on
+its first occurrence, and so did a fifteen-second one.
+
+**What decides is whether one stall outlasts the queue.** The uniform arms put
+that budget at about nine seconds of this session's production, and the tail
+arms land on the same number from the other direction: six seconds is absorbed
+however often it repeats, nine is not, and both fatal arms failed *during* the
+stall rather than after it — 9.8 seconds into the fifteen-second one. So the
+recorder's tolerance is a stall-duration budget, not a bandwidth budget, and the
+bandwidth reading above is the same budget seen through a delay that never lets
+the queue drain.
+
+Restating it as a consumer would need it: `QueueDepth` buys seconds of the
+session's own record rate, and what a disk has to avoid is not being slow but
+stopping for longer than those seconds. A recording that ends this way is still a
+recording — every failed arm replays to its own digest — and what the client sees
+is the proxy closing the connection.
+
 ## What this run does not show
 
 - **A disk that stops answering entirely.** Every delay here returns. A write
   that never lands is what `CloseGrace` bounds, and that path is covered by the
   recorder's own tests rather than by a run.
 - **A real remote filesystem.** The latency is injected per write by a FUSE
-  passthrough, so it is uniform and honest about being uniform; a network
-  filesystem has a tail, and a tail is what usually ends sessions.
+  passthrough. The tail arms above give it a shape, but a deterministic every-Nth
+  stall is still not a distribution: real storage correlates its stalls with load,
+  and this one does not.
 - **More than one session at a time.** Every arm was one client. The queues are
   per session and the goroutines are per session, so contention between sessions
   is untested here.
