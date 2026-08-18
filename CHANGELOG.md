@@ -5,7 +5,11 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
-## [Unreleased]
+## [0.4.1] — 2026-08-18
+
+Everything here is `examples/` and the documents beside it: the core module is
+byte for byte `0.4.0`. The tag exists so the example proxy's recordings and the
+run behind them have a version to name.
 
 ### Added
 
@@ -46,6 +50,21 @@ version is `0`, a minor bump may break the API.
   file ok. What caught it was `trace`, refusing movement for an entity that
   never spawned — which is luck about what the queue happened to drop, not a
   check.
+
+### Fixed
+
+- `examples/` pinned `minecraft-protocol` v0.2.0, three releases behind, whose
+  codec refuses a schema switch carrying a value the schema names no case for.
+  Protocol 775 supplies them in ordinary play — a real client's command tree
+  carries `minecraft:loot_predicate`, and a player taking damage draws a
+  `damage_indicator` particle — and either one ended decoding for the rest of
+  the session. The proxy kept relaying opaquely, so the connection survived and
+  the recording did not: everything after that point failed to replay.
+
+  v0.5.0 reads an unnamed switch value as absent rather than as an error, which
+  is what the ProtoDef compiler ships and what node-minecraft-protocol runs. Two
+  recordings that had failed replay under it, including a 36023-record session
+  from a real 26.1.2 client that used to stop at sequence 97.
 
 ## [0.4.0] — 2026-08-18
 
