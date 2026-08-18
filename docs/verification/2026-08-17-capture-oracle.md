@@ -504,6 +504,28 @@ exists. `lpVec3` is six bytes without its continuation, and so is the three-`i16
 encoding it replaced, so a mis-specified field would consume exactly the right
 number of bytes and produce a valid-looking vector.
 
+One known-motion sample, for whoever fixes it. An arrow summoned with
+`Motion:[0.10d,0.0d,0.0d]` produced this spawn packet, with the velocity field
+isolated:
+
+```
+raw   00 01 49 99fc0184326f416ab6005d0b70e8a3f4 06
+      c012000000000000 c04b800000000000 4023000000000000   x=-4.5 y=-55 z=9.5
+      29 33 7f fe ff fe                                    velocity
+      00 00 00 00                                          pitch yaw headPitch objectData
+```
+
+Our writer encodes `LPVec3{X: 0.1}` as `29 33 fe ff fe 7f` — the same first two
+bytes and the last four in the opposite order. That is not a byte-order fix,
+though: reading vanilla's six bytes back at every permutation of the three
+component shifts, both 48-bit byte orders, and biased, unsigned, and signed
+fifteen-bit mappings produces nothing near `(0.1, 0, 0)`. Whatever vanilla is
+doing is a different packing, not our packing written backwards. A second sample
+is in the same file, an arrow summoned with `Motion:[0.0d,0.0d,0.05d]`, whose
+velocity bytes are `f9 ff 86 64 ff fd`. The zero case does match: an item
+summoned with no motion encodes as the single byte `00`, which is what
+`WriteLPVec3` produces.
+
 It is recorded rather than fixed here. It belongs to `minecraft-protocol`, and
 it does not touch what M9.1b claims: positions arrive as `float64` fields and
 `int16` deltas, neither of which goes through that codec. What it does mean is
