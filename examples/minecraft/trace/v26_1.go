@@ -124,14 +124,13 @@ func (v26_1Rules) delta(dx, dy, dz int16) Vec3 {
 // quantised vector that decodes to the value itself, so the only error is the
 // encoding's own resolution.
 //
-// A live capture against a pinned 26.1.2 server disagrees with that decoding,
-// and the disagreement is recorded rather than worked around here. See
-// relay/docs/verification/2026-08-17-capture-oracle.md: velocities read out of
-// a real session cluster on repeated values near one and do not match the
-// motion the same entity's relative moves report, which points at the LPVec3
-// codec in minecraft-protocol rather than at this file. Positions are
-// unaffected — they are float64 and int16 deltas, neither of which goes through
-// that codec.
+// A live capture against a pinned 26.1.2 server found that codec reading the
+// wrong byte order — vanilla writes the packed vector's upper thirty-two bits
+// big endian and it read them little endian, which round-tripped perfectly
+// against itself and decoded every real velocity into a plausible number
+// unrelated to the motion. Fixed in minecraft-protocol; this repository pins
+// released versions, so it arrives here at the next release. See
+// relay/docs/verification/2026-08-17-capture-oracle.md.
 func velocityBlocks(v java.LPVec3) Vec3 { return Vec3{X: v.X, Y: v.Y, Z: v.Z} }
 
 // relativeMask projects 775's per-axis flags onto the three bits playerAt
