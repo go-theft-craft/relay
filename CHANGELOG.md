@@ -5,6 +5,72 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+## [0.4.2] — 2026-08-18
+
+`examples/` and the documents beside it again: the core module is unchanged from
+`0.4.0`, and the tag is here so a recording, a trajectory and the runs behind
+them have a version to name.
+
+### Added
+
+- `trace` reads protocol 775 entity motion. Positions arrive as `float64` and
+  relative moves as `int16` at 4096 units to the block, and one spawn packet
+  carries an entity type where 47 had a packet per family.
+
+  The scale is measured rather than assumed: two arrows summoned three blocks
+  apart in height, onto one flat surface, reported falls of 20275 and 32563
+  units, so a block is `(32563 - 20275) / 3` — with nothing assumed about where
+  the surface was.
+
+- Per-version replay tolerance in `trace`. A thirty-second of a block is a 1.8
+  artifact rather than a project-wide number, so 775 gets a zero absolute
+  allowance and a tighter relative one, and an unknown protocol gets an error
+  instead of another version's number.
+
+- `examples/minecraft/conform`, a two-version gate harness the M9 mechanics use
+  rather than each inventing one. A scenario naming no lane for a registered
+  version is an error, an absent mechanic has to say why it is absent, and each
+  lane compares at its own version's tolerance. Recordings arrive through a
+  `Loader`, so a test can state what a capture held without committing one — a
+  `.mccap` carries UUIDs, usernames and chat.
+
+### Changed
+
+- `trace` dispatches extraction per protocol version: a registry keyed by
+  protocol ID, one file per version, and an unregistered version failing at
+  `ErrUnsupportedProtocol`. The extractor's own comment already said a second
+  version is a second implementation rather than a flag; this makes it
+  structural. No behaviour change, and the protocol 47 tests pass unmoved.
+
+### Notes
+
+- The sink policy added in `0.4.0` has now been run in front of real servers
+  rather than only reasoned about, and
+  `docs/verification/2026-08-18-sink-policy-live.md` carries all of it. The
+  recorder keeps its own queue and the core's stays out of the capture path; a
+  slow disk was injected per write syscall through a FUSE mount, where the
+  recorder held to roughly 15 KB/s on a session producing 14; a tail showed the
+  tolerance is a stall-duration budget rather than a bandwidth one, since a
+  nine-second stall ends a session that the same *mean* delay does not; and six
+  sessions at once showed the per-session queue isolating the pump and each
+  session's bursts, but not a shared disk — the same stalls end one session of
+  six on separate devices and four of six on one.
+
+  Nothing in the module changed for any of it. The one thing a consumer should
+  take away is that `QueueDepth` buys seconds of a session's own record rate,
+  and that `CloseGrace` is per session while a disk is not.
+
+- A defect this repository found but does not carry the fix for:
+  `minecraft-protocol`'s `LPVec3` codec read and wrote all forty-eight bits
+  little endian, while vanilla writes the upper thirty-two through Netty's
+  big-endian `writeInt`. Wrong in both directions is why every round-trip test
+  passed — the package agreed with itself about a layout no server uses.
+
+  It is fixed upstream. `relay` pins released versions, so `examples/` picks it
+  up at `minecraft-protocol`'s next release rather than from a working tree, and
+  until then a 775 velocity read here is the packed value rather than the motion.
+  Positions are unaffected, which is why the trajectories above are not.
+
 ## [0.4.1] — 2026-08-18
 
 Everything here is `examples/` and the documents beside it: the core module is
