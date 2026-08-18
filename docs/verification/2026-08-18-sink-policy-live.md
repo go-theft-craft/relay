@@ -215,6 +215,67 @@ stopping for longer than those seconds. A recording that ends this way is still 
 recording — every failed arm replays to its own digest — and what the client sees
 is the proxy closing the connection.
 
+## Several sessions at once
+
+The queues and the goroutines behind them are per session, which is a claim
+about isolation that one client cannot test. So the same stack was run with
+several clients at once — and with one more knob on the mount, `-serial`, which
+puts every write behind a single lock so concurrent recorders share one device
+instead of each getting their own.
+
+A note on the client first, because it shapes what could be measured. The orbit
+bot quits once the server has corrected its movement six times, and six of them
+on one spawn circle collide immediately: those sessions last about a second, so
+they measure a login burst and nothing after it. The arms below use
+`headless-minecraft`'s `observe` instead, which watches for as long as it is
+given and produced about 84 records a second per session, some 500 across the
+six of them.
+
+| Clients | Device | Latency | Sessions the recorder ended | Recordings |
+| --- | --- | --- | --- | --- |
+| 5 orbit | real | — | 0 | 5 replay |
+| 10 orbit | real | — | 0 | 10 replay |
+| 6 observe | real | — | 0 | 6 replay, ~3350 records each |
+| 6 observe | one each | 2 s per write | 0 | 6 replay, ~3100 each |
+| 6 observe | **shared** | 2 s per write | **4** | 6 replay |
+| 6 observe | one each | 15 s every 15th write | **1** | 6 replay |
+| 6 observe | **shared** | 15 s every 15th write | **4** | 6 replay |
+
+**Concurrency on its own changes nothing.** Five, six and ten sessions at once
+each got their own recording, their own frame numbering and their own clock
+origin, and every recording replays to its own digest. The relay log is empty of
+faults in all three. The ten-client arm is worth keeping for a second reason:
+the server's own cap refused two logins, and those two recordings hold the
+refusal — six records, `The server is full!`, replaying like anything else.
+
+**Isolation holds exactly as far as the device does.** The two 15-second-stall
+arms differ in nothing but who owns the disk. With a device each, one session hit
+a stall long enough to outlast its queue and ended, and the other five ran to
+their full forty seconds — eleven stalls happened in that arm and cost one
+session. With one shared device, the same stalls ended four of the six, because a
+write that stops the device stops it for whoever is queued behind it too. Sustained
+slowness says the same thing: two seconds per write kills nobody when each
+recorder has its own device and four of six when they share one.
+
+So the per-session queue is isolation from the *pump* and from each other's
+bursts, and it is not isolation from a disk. That is the honest shape of it: six
+recorders behind one slow disk each get a sixth of it, and the queue is what
+turns that into ended sessions rather than stalled proxies.
+
+**Teardown contends too, and it is the part that can lose a trailer.**
+`CloseGrace` bounds how long `CloseSession` waits for a session's remaining
+records — thirty seconds, which is generous for one session and not for six
+closing at once onto a shared device. Three of the six in the two-second arm
+reported `recording still writing 30s after its session closed; left to finish on
+its own`. In an earlier arm the proxy then exited while one of those writers was
+still draining, and that recording ended up without its trailer. The gate refuses
+it — `the recording has no trailer; it was never closed` — which is the right
+answer and worth contrasting with the dropped-record case above, where the file
+was incomplete and the gate said ok.
+
+**The core's queue never fired in any of them.** Every concurrency arm ran the
+default policy except where noted, and no arm produced a `sink queue overflow`.
+
 ## What this run does not show
 
 - **A disk that stops answering entirely.** Every delay here returns. A write
@@ -224,9 +285,10 @@ is the proxy closing the connection.
   passthrough. The tail arms above give it a shape, but a deterministic every-Nth
   stall is still not a distribution: real storage correlates its stalls with load,
   and this one does not.
-- **More than one session at a time.** Every arm was one client. The queues are
-  per session and the goroutines are per session, so contention between sessions
-  is untested here.
+- **More than ten sessions, or more than one proxy.** The concurrency arms top
+  out at the server's own player cap, on one host, in one process. What a
+  hundred sessions do to a shared disk is arithmetic from here rather than a
+  measurement.
 - **A human client.** The sessions here are a bot on a flat world, a third of a
   second in the arms that were cut short and half a minute in the ones that were
   not. The five-minute human session in `2026-08-17-headless-client-capture`
