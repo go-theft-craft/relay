@@ -5,7 +5,9 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
-## [Unreleased]
+## [0.4.3] — 2026-08-18
+
+`examples/` once more; the core module is unchanged from `0.4.0`.
 
 ### Fixed
 
