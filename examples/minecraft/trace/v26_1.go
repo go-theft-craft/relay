@@ -128,9 +128,9 @@ func (v26_1Rules) delta(dx, dy, dz int16) Vec3 {
 // wrong byte order — vanilla writes the packed vector's upper thirty-two bits
 // big endian and it read them little endian, which round-tripped perfectly
 // against itself and decoded every real velocity into a plausible number
-// unrelated to the motion. Fixed in minecraft-protocol; this repository pins
-// released versions, so it arrives here at the next release. See
-// relay/docs/verification/2026-08-17-capture-oracle.md.
+// unrelated to the motion. Fixed in minecraft-protocol v0.6.0, which this
+// repository now takes, so a velocity read here is the one the server sent.
+// See relay/docs/verification/2026-08-17-capture-oracle.md.
 func velocityBlocks(v java.LPVec3) Vec3 { return Vec3{X: v.X, Y: v.Y, Z: v.Z} }
 
 // relativeMask projects 775's per-axis flags onto the three bits playerAt

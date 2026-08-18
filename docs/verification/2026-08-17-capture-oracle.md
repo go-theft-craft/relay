@@ -556,12 +556,13 @@ slime 66  velocity {-0.002, -0.078, 0.005} falling
 Every one of those is the number the game states or a value physics explains,
 where before they were repeats of 0.9942 and 0.8588.
 
-`relay` pins released versions of `minecraft-protocol`, so this repository picks
-the fix up at the next release rather than from the working tree; the run above
-was made with a temporary `replace` and no such directive is committed. Until
-that release, a 775 sample's `Velocity` read by a build of this repository is
-still the old number. Positions were never affected: they arrive as `float64`
-fields and `int16` deltas, neither of which goes through that codec.
+`relay` pins released versions of `minecraft-protocol`. The run above was made
+with a temporary `replace`; the fix shipped in v0.6.0 and this repository now
+takes it, so the numbers above are what a build of this tree produces —
+re-extracting the same recording with `mcrelay` built from the pinned version
+gives the two summoned arrows exactly the motion they were summoned with.
+Positions were never affected: they arrive as `float64` fields and `int16`
+deltas, neither of which goes through that codec.
 
 ### What this run does not cover
 
