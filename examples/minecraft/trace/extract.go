@@ -4,20 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	protocol "github.com/go-theft-craft/minecraft-protocol"
 	mccapture "github.com/go-theft-craft/minecraft-protocol/capture"
-	"github.com/go-theft-craft/minecraft-protocol/generated/java/v1_8"
 	"github.com/go-theft-craft/minecraft-protocol/protocols"
 )
 
 // ErrUnsupportedProtocol reports a recording this extractor cannot read.
 //
-// Only protocol 47 is implemented. The movement packets, their fixed-point
-// scales, and the set of spawn packets are all version-specific, so a second
-// version is a second implementation rather than a flag — and claiming support
-// by decoding 775 with 47's rules would produce plausible numbers that are
-// quietly wrong.
+// The movement packets, their scales, and the set of spawn packets are all
+// version-specific, so a version is an implementation rather than a flag — and
+// claiming support by decoding one version with another's rules would produce
+// plausible numbers that are quietly wrong. SupportedProtocols names the
+// versions that have one; anything else fails here rather than being decoded
+// by the wrong rules.
 var ErrUnsupportedProtocol = errors.New("trace: unsupported protocol")
 
 // ErrUnknownEntity reports a movement for an entity that never spawned.
@@ -52,8 +53,10 @@ func Extract(descriptor protocol.Protocol, limits protocol.Limits, records []mcc
 	if descriptor == nil {
 		return nil, fmt.Errorf("%w: no descriptor", ErrUnsupportedProtocol)
 	}
-	if descriptor.ID() != v1_8.Protocol().ID() {
-		return nil, fmt.Errorf("%w: %q, want %q", ErrUnsupportedProtocol, descriptor.ID(), v1_8.Protocol().ID())
+	handler, ok := lookup(descriptor.ID())
+	if !ok {
+		return nil, fmt.Errorf("%w: %q, want one of %v",
+			ErrUnsupportedProtocol, descriptor.ID(), SupportedProtocols())
 	}
 
 	client, err := descriptor.NewSession(protocol.RoleClient, limits)
@@ -66,7 +69,7 @@ func Extract(descriptor protocol.Protocol, limits protocol.Limits, records []mcc
 		return nil, fmt.Errorf("trace: build the serverbound decoding session: %w", err)
 	}
 
-	e := &extractor{client: client, server: server, live: make(map[int32]*Trace)}
+	e := &extractor{rules: handler, client: client, server: server, live: make(map[int32]*Trace)}
 
 	for _, record := range records {
 		if err := e.consume(record); err != nil {
@@ -116,6 +119,10 @@ func Extract(descriptor protocol.Protocol, limits protocol.Limits, records []mcc
 // produces traces for every entity in the world except the one the session was
 // about.
 type extractor struct {
+	// rules is the one version's packet handling, resolved once per extraction
+	// from the descriptor the recording named.
+	rules versionRules
+
 	client protocol.Session
 	server protocol.Session
 
@@ -205,72 +212,17 @@ func (e *extractor) consume(record mccapture.Record) error {
 	return e.apply(record, packet)
 }
 
-// apply is the packet-to-motion mapping, written as one switch so a reader
-// tracing a wrong trajectory can see every packet that could have produced it.
+// apply hands one decoded packet to the version's rules.
+//
+// The rules report whether the packet carried motion. Nothing counts that
+// today — playOffered and playDecoded already separate "not read" from "read"
+// — but the driver is where such a counter would go, which is why the answer
+// comes back here rather than being swallowed inside a version file.
 func (e *extractor) apply(record mccapture.Record, packet protocol.Packet) error {
-	switch value := packet.Value.(type) {
-	// The join packet is the only place the connecting player's own entity ID
-	// appears. It carries no position, so it opens no trace.
-	case *v1_8.PlayClientboundLogin:
-		e.self, e.named = value.EntityID, true
+	_, err := e.rules.Apply(e, record, packet)
 
-	// The server's teleport places the player, and its flag byte says which
-	// axes are corrections rather than placements.
-	case *v1_8.PlayClientboundPosition:
-		// A teleport says nothing about footing, so the sample keeps whatever
-		// the player last reported rather than claiming they left the ground.
-		return e.playerAt(record, Vec3{X: value.X, Y: value.Y, Z: value.Z}, value.Flags, e.playerOnGround())
-
-	// What the player did between corrections is only ever reported by the
-	// player. Walking, sprinting, jumping, and falling all arrive here.
-	case *v1_8.PlayServerboundPosition:
-		return e.playerAt(record, Vec3{X: value.X, Y: value.Y, Z: value.Z}, 0, value.OnGround)
-
-	case *v1_8.PlayServerboundPositionLook:
-		return e.playerAt(record, Vec3{X: value.X, Y: value.Y, Z: value.Z}, 0, value.OnGround)
-
-	case *v1_8.PlayClientboundNamedEntitySpawn:
-		e.spawn(record, value.EntityID, FamilyPlayer, fixed(value.X, value.Y, value.Z), Vec3{})
-
-	case *v1_8.PlayClientboundSpawnEntity:
-		data := value.ObjectData.Default
-		e.spawn(record, value.EntityID, objectFamily(value.Type), fixed(value.X, value.Y, value.Z), velocity(data.VelocityX, data.VelocityY, data.VelocityZ))
-
-	case *v1_8.PlayClientboundSpawnEntityLiving:
-		e.spawn(record, value.EntityID, FamilyLiving, fixed(value.X, value.Y, value.Z), velocity(value.VelocityX, value.VelocityY, value.VelocityZ))
-
-	case *v1_8.PlayClientboundSpawnEntityExperienceOrb:
-		e.spawn(record, value.EntityID, FamilyExperienceOrb, fixed(value.X, value.Y, value.Z), Vec3{})
-
-	case *v1_8.PlayClientboundEntityTeleport:
-		return e.absolute(record, value.EntityID, fixed(value.X, value.Y, value.Z), value.OnGround)
-
-	case *v1_8.PlayClientboundRelEntityMove:
-		return e.relative(record, value.EntityID, delta(value.DX, value.DY, value.DZ), value.OnGround)
-
-	case *v1_8.PlayClientboundEntityMoveLook:
-		return e.relative(record, value.EntityID, delta(value.DX, value.DY, value.DZ), value.OnGround)
-
-	case *v1_8.PlayClientboundEntityVelocity:
-		return e.velocity(value.EntityID, velocity(value.VelocityX, value.VelocityY, value.VelocityZ))
-
-	case *v1_8.PlayClientboundEntityDestroy:
-		for _, id := range value.EntityIds {
-			e.close(id)
-		}
-	}
-
-	return nil
+	return err
 }
-
-// The bits protocol 47's teleport sets to mean "add this to where you already
-// are" rather than "you are here". The rotation bits are ignored: a trace holds
-// no rotation, so reading them would only invite the reader to think it does.
-const (
-	positionRelativeX int8 = 0x01
-	positionRelativeY int8 = 0x02
-	positionRelativeZ int8 = 0x04
-)
 
 // playerOnGround reports the footing the player last claimed, and false before
 // they have claimed any.
@@ -425,40 +377,9 @@ func (e *extractor) done() []Trace {
 
 func last(trace *Trace) Sample { return trace.Samples[len(trace.Samples)-1] }
 
-// fixed converts protocol 47's fixed-point position to blocks.
-func fixed(x, y, z int32) Vec3 {
-	return Vec3{X: float64(x) / positionScale, Y: float64(y) / positionScale, Z: float64(z) / positionScale}
-}
-
-// delta converts a relative move, which uses the same scale in one byte.
-func delta(dx, dy, dz int8) Vec3 {
-	return Vec3{X: float64(dx) / positionScale, Y: float64(dy) / positionScale, Z: float64(dz) / positionScale}
-}
-
 func velocity(vx, vy, vz int16) Vec3 {
 	return Vec3{X: float64(vx) / velocityScale, Y: float64(vy) / velocityScale, Z: float64(vz) / velocityScale}
 }
-
-// objectFamily names the two object types the gameplay work cares about. The
-// rest keep the generic family with their type appended, so a recording of
-// something unmodelled is still readable rather than silently mislabelled.
-func objectFamily(kind int8) string {
-	switch kind {
-	case objectTypeItem:
-		return FamilyItem
-	case objectTypeArrow:
-		return FamilyArrow
-	default:
-		return fmt.Sprintf("%s/%d", FamilyObject, kind)
-	}
-}
-
-// The two object type identifiers this file names. They are protocol 47
-// constants.
-const (
-	objectTypeArrow int8 = 60
-	objectTypeItem  int8 = 2
-)
 
 // ExtractFile reads a recording and extracts its traces.
 //
@@ -513,4 +434,52 @@ func ExtractFile(path string) ([]Trace, mccapture.Header, error) {
 	traces, err := Extract(descriptor, limits, records)
 
 	return traces, header, err
+}
+
+// versionRules turns one version's play packets into motion on the shared
+// accumulator. The packet sets, the coordinate scales, and the spawn packets
+// are all version-specific, so this is an interface rather than a switch: a
+// registry keyed by protocol ID means an unregistered version fails at
+// ErrUnsupportedProtocol rather than being decoded by the wrong rules.
+type versionRules interface {
+	// ProtocolID is the descriptor ID these rules read.
+	ProtocolID() string
+	// Apply folds one decoded play packet into the accumulator. It reports
+	// false when the packet carries no motion, so the driver can tell "read
+	// and irrelevant" from "not read".
+	Apply(e *extractor, record mccapture.Record, packet protocol.Packet) (bool, error)
+}
+
+// rules is keyed by protocol ID. Each version file registers itself from init,
+// so adding a version is adding a file.
+var rules = map[string]versionRules{}
+
+func register(r versionRules) {
+	if _, dup := rules[r.ProtocolID()]; dup {
+		panic("trace: two rule sets registered for " + r.ProtocolID())
+	}
+
+	rules[r.ProtocolID()] = r
+}
+
+func lookup(id string) (versionRules, bool) {
+	r, ok := rules[id]
+
+	return r, ok
+}
+
+// SupportedProtocols is the sorted list of protocol IDs this package reads.
+//
+// Exported because the conformance harness enumerates it to refuse a scenario
+// that checks one version and claims nothing about another, and because an
+// error naming what the tool can read is more use than one naming only what it
+// cannot.
+func SupportedProtocols() []string {
+	ids := make([]string, 0, len(rules))
+	for id := range rules {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+
+	return ids
 }
