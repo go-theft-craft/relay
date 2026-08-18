@@ -16,10 +16,19 @@ import (
 	"github.com/go-theft-craft/relay/examples/minecraft/trace"
 )
 
-// tolerance is one thirty-second of a block: protocol 47 sends positions as
-// fixed point, so nothing finer than this is observable in a capture and a test
-// asserting more would be asserting about float arithmetic.
-const tolerance = 1.0 / 32
+// tolerance47 is what protocol 47's own encoding allows, read from the package
+// rather than written here: the derivation lives beside the number in
+// tolerance.go, and a test with its own copy is a second place for it to drift.
+func tolerance47(t *testing.T) float64 {
+	t.Helper()
+
+	allowance, err := trace.ToleranceFor(v1_8.Protocol().ID())
+	if err != nil {
+		t.Fatalf("ToleranceFor 47: %v", err)
+	}
+
+	return allowance.Relative
+}
 
 func testLimits(t *testing.T) protocol.Limits {
 	t.Helper()
@@ -149,13 +158,13 @@ func TestRelativeMovesAccumulateOntoTheLastSpawn(t *testing.T) {
 	}
 
 	last := traces[0].Samples[len(traces[0].Samples)-1]
-	if math.Abs(last.Position.X-101.0) > tolerance {
+	if math.Abs(last.Position.X-101.0) > tolerance47(t) {
 		t.Errorf("X accumulated to %.4f, want 101.0", last.Position.X)
 	}
-	if math.Abs(last.Position.Z-200.5) > tolerance {
+	if math.Abs(last.Position.Z-200.5) > tolerance47(t) {
 		t.Errorf("Z accumulated to %.4f, want 200.5", last.Position.Z)
 	}
-	if math.Abs(last.Position.Y-64.0) > tolerance {
+	if math.Abs(last.Position.Y-64.0) > tolerance47(t) {
 		t.Errorf("Y drifted to %.4f with no vertical move", last.Position.Y)
 	}
 }
@@ -175,7 +184,7 @@ func TestATeleportResetsRatherThanAccumulates(t *testing.T) {
 	})
 
 	last := traces[0].Samples[len(traces[0].Samples)-1]
-	if math.Abs(last.Position.X-10.0) > tolerance {
+	if math.Abs(last.Position.X-10.0) > tolerance47(t) {
 		t.Errorf("X after a teleport = %.4f, want 10.0", last.Position.X)
 	}
 	if !last.OnGround {
@@ -212,7 +221,7 @@ func TestThePlayersOwnMotionIsTraced(t *testing.T) {
 	}
 
 	last := traces[0].Samples[len(traces[0].Samples)-1]
-	if math.Abs(last.Position.X-101.0) > tolerance || math.Abs(last.Position.Z-200.5) > tolerance {
+	if math.Abs(last.Position.X-101.0) > tolerance47(t) || math.Abs(last.Position.Z-200.5) > tolerance47(t) {
 		t.Errorf("the player ended at %.4f/%.4f, want 101.0/200.5", last.Position.X, last.Position.Z)
 	}
 	if !last.OnGround {
@@ -234,10 +243,10 @@ func TestARelativeTeleportCorrectsRatherThanReplaces(t *testing.T) {
 	})
 
 	last := traces[0].Samples[len(traces[0].Samples)-1]
-	if math.Abs(last.Position.X-100.5) > tolerance {
+	if math.Abs(last.Position.X-100.5) > tolerance47(t) {
 		t.Errorf("a relative correction put X at %.4f, want 100.5", last.Position.X)
 	}
-	if math.Abs(last.Position.Y-64.0) > tolerance {
+	if math.Abs(last.Position.Y-64.0) > tolerance47(t) {
 		t.Errorf("a zero relative Y moved the player to %.4f, want 64.0", last.Position.Y)
 	}
 }
@@ -315,7 +324,7 @@ func TestAReusedEntityIDStartsANewTrace(t *testing.T) {
 	if traces[1].Family != trace.FamilyArrow {
 		t.Errorf("second family = %q, want %q", traces[1].Family, trace.FamilyArrow)
 	}
-	if got := traces[1].Samples[0].Position.X; math.Abs(got-500.0) > tolerance {
+	if got := traces[1].Samples[0].Position.X; math.Abs(got-500.0) > tolerance47(t) {
 		t.Errorf("the second trace starts at X %.4f, want 500.0 — it inherited the first", got)
 	}
 }
