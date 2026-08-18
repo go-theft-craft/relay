@@ -120,11 +120,67 @@ The core's policy keeps its reason to exist: a sink you do not control, which is
 where it started. `mcrelay` warns at startup when both are configured, because
 the smaller queue silently decides which one you are actually running.
 
+## The slow disk, measured
+
+The arms above forced every failure by shrinking a queue, which leaves the
+question the queue exists for unanswered: what does it absorb when the *disk* is
+slow. So the recordings were written onto a passthrough filesystem that holds
+every write open for a fixed duration — `slowfs` in the evidence directory,
+about a hundred lines of FUSE — and the same live stack was run onto it. Nothing
+in the proxy changed: real files, real write syscalls, and the syscalls take as
+long as the mount says.
+
+| Delay per write | Writes | Bytes | Outcome |
+| --- | --- | --- | --- |
+| none | 9 | 148 KB | ok, 772 records |
+| 50 ms | 75 | 582 KB | ok, 6108 records |
+| 500 ms `-capture` | 43 | 531 KB | ok, 5418 records |
+| 200 ms `-capture` | 61 | 571 KB | ok, 5958 records |
+| 1 s | 29 | 519 KB | ok, 5260 records |
+| 2 s | 6 | 113 KB | **recorder ended the session**; ok, 480 records |
+| 4 s | 4 | 80 KB | **recorder ended the session**; ok, 485 records |
+| 2 s, core policy on | 6 | 116 KB | **recorder ended the session**; ok, 573 records |
+
+Four things fall out of it.
+
+**The recorder writes in flushes, not in records.** 772 records left the process
+as 9 write syscalls, and a slower disk makes the writes larger rather than more
+frequent — 18 KB apiece at one second, against 16 KB at fifty milliseconds. So
+what a slow disk costs a recording is per flush, and the buffer underneath
+absorbs the first order of it for free.
+
+**It survives to about 15 KB/s, on a session that produces 14.** One second per
+write is a disk delivering roughly 18 KB/s at these flush sizes, and the session
+kept going for its full 36 seconds. Two seconds per write halves that and the
+recorder gives up. The threshold is not a latency: it is the point where
+sustained write bandwidth falls under what the session produces, which is what a
+bounded queue is supposed to do and not a number to tune against.
+
+**The queue buys about nine seconds, and the disk's slowness does not change
+that.** Failure came 9.1 s into the session at two seconds per write and 8.5 s at
+four. A queue of 1024 records absorbs a burst, and against a sustained shortfall
+it only sets how long the recording lasts before the recorder says so — the
+depth and the session's rate decide that, not how slow the disk is.
+
+**The core's queue never fired.** The last arm ran `-sink-overflow end-session
+-sink-queue 1024` alongside the same two-second disk: the recorder ended the
+session, and the relay log holds no `sink queue overflow` at all. That is the
+claim this repository's decision rests on, and it is now a run rather than an
+argument — a slow disk fills the recorder's queue and never reaches the core's,
+because the recorder's `Message` returns whether or not the disk is answering.
+
+Every arm that survived ran to the bot's own exit, and every arm that failed
+left a recording that replays to its own digest. A capture stopped by a slow
+disk is still a capture.
+
 ## What this run does not show
 
-- **A slow disk.** Every failure here was forced by shrinking a queue, not by
-  making a write slow. What the recorder's queue absorbs in production is still
-  unmeasured; what is measured is what happens when it cannot absorb it.
+- **A disk that stops answering entirely.** Every delay here returns. A write
+  that never lands is what `CloseGrace` bounds, and that path is covered by the
+  recorder's own tests rather than by a run.
+- **A real remote filesystem.** The latency is injected per write by a FUSE
+  passthrough, so it is uniform and honest about being uniform; a network
+  filesystem has a tail, and a tail is what usually ends sessions.
 - **More than one session at a time.** Every arm was one client. The queues are
   per session and the goroutines are per session, so contention between sessions
   is untested here.
@@ -142,5 +198,7 @@ the smaller queue silently decides which one you are actually running.
 `../oracle-evidence/2026-08-18-sink-policy/`, outside this repository, because
 `.gitignore` excludes `*.mccap` for the reason it always has: a recording holds
 usernames and UUIDs. It holds every arm's recording, relay log, client log and
-database, the `run.sh` that produced them, the `mcrelay` binary they were taken
-with, and `SHA256SUMS` over the lot.
+database, the `run.sh` and `run-slow.sh` that produced them, `slowfs` in source
+and built, the `mcrelay` binary they were taken with, and `SHA256SUMS` over the
+lot. The slow-disk arms keep their recordings in `backing/`, which is what the
+mount wrote through to.
