@@ -171,6 +171,16 @@ and pays the copy knowingly; one that does not keeps today's cost exactly.
       leaning on the core means the recorder no longer needs `Bind`, `Attach`, or
       `Session.SinkID` for this purpose. Recommendation: keep the sink's queue
       until the core's policy has run against a real server, then remove one.
+
+      *Run and decided on 2026-08-18: the recorder keeps its queue, and the
+      core's stays out of the capture path.
+      `docs/verification/2026-08-18-sink-policy-live.md` has the eight arms. The
+      short of it is that the recorder never blocks, so a slow disk fills its
+      queue and never reaches the core's — which leaves the core's able to fire
+      only on a burst that outruns a channel send, at a copy per message per
+      sink. Both mechanisms were made to fire and both left a recording that
+      replays; `SinkOverflowDrop` in front of the recorder left one that does
+      not, and passes the gate anyway.*
 - [x] **Step 3:** Whichever way step 2 goes, `MultiSink`'s serial fan-out is
       unchanged and still means one slow child delays its siblings. Say so in its
       doc comment, or give it a goroutine per child and a note about ordering.
@@ -225,6 +235,7 @@ and pays the copy knowingly; one that does not keeps today's cost exactly.
   policy is taken away.
 
 The capture sink keeps its own queue, as the recommendation in Task 4 said it
-should. Removing one of the two is a decision for after the core's policy has
-been through a real server, and the recording it would be trusted to bound is
-the evidence everything else in this tree is judged against.
+should — and keeps it for good now. The core's policy went through a real server
+on 2026-08-18 and the two queues turned out to absorb different failures, only
+one of which this sink can actually suffer:
+`docs/verification/2026-08-18-sink-policy-live.md`.

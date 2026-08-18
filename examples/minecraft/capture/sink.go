@@ -91,11 +91,17 @@ type RecordSink interface {
 // slow rather than the pump being fast, and its CloseGrace is what makes a
 // returned CloseSession mean a finished file.
 //
-// Running both is two bounded queues in a row, which is a hop worth removing
-// eventually. Not yet: the core's policy has not been through a real server, and
-// the recording it would be trusted to bound is the evidence everything else
-// here is judged against. The one to remove is decided after that run, not
-// before it.
+// Running both is two bounded queues in a row, and that question is settled:
+// the core's belongs in front of a sink you do not control, not in front of this
+// one. Because Message never blocks — it copies, sends, and fails the recording
+// rather than parking the caller — a slow disk fills this queue and never
+// reaches the core's, so the core's can only fire on a burst that outruns a
+// channel send, at a copy per message per sink. And SinkOverflowBlock is the
+// default, so a consumer who configures nothing gets this queue and nothing
+// else: a capture's guarantee cannot rest on a flag somebody else remembered to
+// set. docs/verification/2026-08-18-sink-policy-live.md is the run both
+// mechanisms were put through, including the one where the core's drop policy
+// lost 783 records and the replay gate still called the file ok.
 type Recorder struct {
 	opts Options
 

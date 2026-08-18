@@ -208,3 +208,63 @@ func TestTraceWithoutAnInputIsAnError(t *testing.T) {
 		t.Error("trace with no -in exited zero")
 	}
 }
+
+// TestParseSinkOverflowNamesEveryPolicy pins the flag's vocabulary. The names
+// are typed by somebody choosing behaviour, so they are the flag's own and not
+// the constants' — which means nothing but a test keeps the two in step.
+func TestParseSinkOverflowNamesEveryPolicy(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]relay.SinkOverflowPolicy{
+		"block":       relay.SinkOverflowBlock,
+		"drop":        relay.SinkOverflowDrop,
+		"end-session": relay.SinkOverflowEndSession,
+		" block ":     relay.SinkOverflowBlock,
+	} {
+		got, err := parseSinkOverflow(name)
+		if err != nil {
+			t.Errorf("parseSinkOverflow(%q): %v", name, err)
+
+			continue
+		}
+		if got != want {
+			t.Errorf("parseSinkOverflow(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestUnknownSinkOverflowIsAnError covers the wiring rather than the helper: a
+// policy typed wrong has to stop the proxy before it binds a port, not silently
+// leave the sink contract unenforced after the operator asked for it.
+func TestUnknownSinkOverflowIsAnError(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+
+	args := []string{
+		"-upstream", "127.0.0.1:1",
+		"-listen", "0",
+		"-db", filepath.Join(t.TempDir(), "relay.db"),
+		"-sink-overflow", "everything-is-fine",
+	}
+
+	// Bounded, because the failure this guards against is not a wrong exit code
+	// but no exit at all: a policy that parses as something rather than as an
+	// error leaves run() past every check and inside proxy.Run, which returns
+	// when the process is signalled and not before.
+	done := make(chan int, 1)
+	go func() { done <- dispatch(args, io.Discard, &stderr) }()
+
+	select {
+	case code := <-done:
+		if code == 0 {
+			t.Fatal("an unknown -sink-overflow exited zero")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an unknown -sink-overflow started the proxy instead of stopping it")
+	}
+
+	if !strings.Contains(stderr.String(), "sink-overflow") {
+		t.Errorf("stderr does not name the flag: %q", stderr.String())
+	}
+}

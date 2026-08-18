@@ -89,6 +89,13 @@ mcrelay verify ./recordings/*.mccap                      # does it replay?
 mcrelay trace -in ./recordings/session.mccap -out t.json  # trajectories
 ```
 
+`-sink-overflow` picks the core's policy for a sink that cannot keep up —
+`block`, `drop`, or `end-session` — with `-sink-queue` sizing the queue the last
+two use. Both sinks here honour the contract on their own, so the default leaves
+the core out of it; the flags exist because a policy nobody can run is a claim.
+Use `drop` on a recording proxy and the capture will be missing frames it does
+not know are missing.
+
 ### What the parts are for
 
 - **`Framer`** adapts the Java edition frame envelope. A relay message is one
@@ -123,7 +130,11 @@ mcrelay trace -in ./recordings/session.mccap -out t.json  # trajectories
   numbers that are wrong.
 - **`replaycheck`** replays a recording and compares the digest with the one the
   file's own trailer carries. A recording that does not reproduce itself is not
-  evidence.
+  evidence. It is not a completeness check, and the difference matters: the
+  digest covers what was written, so a recording missing records replays to its
+  own digest and passes. A live run lost 783 records to
+  `relay.SinkOverflowDrop` and this gate called the file ok —
+  `docs/verification/2026-08-18-sink-policy-live.md`.
 
 **Decoding still stops at encryption, and so does framing.** Once a session
 completes a key exchange the codec returns `ErrEncrypted` and both framers stop

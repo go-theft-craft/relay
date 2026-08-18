@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -83,6 +84,10 @@ func run(args []string) error {
 		drain     = flags.Duration("drain", 5*time.Second, "how long a closing session may finish an in-flight write")
 		capture   = flags.Bool("capture", false, "record every raw byte of the client connection, not just decoded messages")
 		record    = flags.String("record", "", "directory to write one replayable .mccap recording per session into")
+		recordQ   = flags.Int("record-queue", 0, "records one session may hold for its recording file; 0 takes the recorder default")
+
+		sinkOverflow = flags.String("sink-overflow", "block", "what a session does when its sink cannot keep up: block, drop, or end-session")
+		sinkQueue    = flags.Int("sink-queue", 0, "records one session may hold for its sink; 0 takes the core default, and it is meaningless under -sink-overflow block")
 	)
 
 	flags.Usage = func() {
@@ -131,11 +136,21 @@ func run(args []string) error {
 	}
 	defer func() { _ = sink.Close() }()
 
+	overflow, err := parseSinkOverflow(*sinkOverflow)
+	if err != nil {
+		return err
+	}
+
 	// Recording composes with the store rather than replacing it, which is the
 	// point of a Sink being an interface: one connection, two things watching
 	// it, neither aware of the other.
 	sinks := relay.Sink(sink)
 	hooks := []relay.Hook{describePackets(logger)}
+	if overflow == relay.SinkOverflowDrop {
+		// Only under drop, because that is the only policy that loses anything,
+		// and the watch costs a map lookup under a mutex for every message.
+		hooks = append(hooks, reportSinkDrops(logger))
+	}
 	if *record != "" {
 		inner, err := java.NewFramer(limits)
 		if err != nil {
@@ -147,6 +162,7 @@ func run(args []string) error {
 			Descriptor: descriptor,
 			Limits:     limits,
 			Framer:     inner,
+			QueueDepth: *recordQ,
 			OnError: func(err error) {
 				logger.Error("recording", slog.Any("err", err))
 			},
@@ -156,6 +172,18 @@ func run(args []string) error {
 		}
 
 		sinks = minecraft.NewMultiSink(sink, recorder)
+		if overflow != relay.SinkOverflowBlock {
+			// Two bounded queues in a row, and the smaller one decides. The
+			// recorder honours the Sink contract itself — it queues, and a queue
+			// it cannot drain fails the recording and ends the session — so the
+			// core's queue in front of it can only fire earlier for the same
+			// outcome, at a copy per message per sink.
+			// docs/verification/2026-08-18-sink-policy-live.md has both firing.
+			logger.Warn(
+				"the recorder brings its own queue; the core's is redundant in front of it",
+				slog.String("sink_overflow", overflow.String()),
+			)
+		}
 		// The recorder's hook goes first, because it is what lets a session that
 		// outruns the disk be ended instead of recorded with a hole in it, and a
 		// later hook that drops a message would keep it from ever binding.
@@ -187,6 +215,13 @@ func run(args []string) error {
 		Prober:   minecraft.Prober{Descriptor: descriptor, Timeout: 3 * time.Second},
 		Sink:     sinks,
 		Selector: relay.FirstHealthy(),
+		// Block by default, which is the core's default and means the sinks
+		// above are trusted to keep their own promise. The other two policies
+		// are here because a recording that stops is worth more than one with a
+		// hole in it, and which of those a run wants is a decision made at the
+		// command line rather than compiled in.
+		SinkOverflow:   overflow,
+		SinkQueueDepth: *sinkQueue,
 		// Off by default: it costs a copy per socket read and write, and stores
 		// the whole conversation rather than a row per message.
 		CaptureRaw: *capture,
@@ -207,6 +242,7 @@ func run(args []string) error {
 		slog.String("protocol", descriptor.ID()),
 		slog.String("db", *dbPath),
 		slog.String("recordings", *record),
+		slog.String("sink_overflow", overflow.String()),
 	)
 
 	if err := proxy.Run(ctx); err != nil {
@@ -255,6 +291,62 @@ func describePackets(logger *slog.Logger) relay.Hook {
 			slog.String("name", m.Desc.Name),
 			slog.Int("bytes", len(m.Raw)),
 		)
+
+		return relay.Forward, nil
+	})
+}
+
+// parseSinkOverflow names the core's policies at the command line.
+//
+// The names are the flag's own rather than the constants', because a reader
+// typing one is choosing behaviour and not spelling a Go identifier.
+func parseSinkOverflow(name string) (relay.SinkOverflowPolicy, error) {
+	switch strings.TrimSpace(name) {
+	case "block":
+		return relay.SinkOverflowBlock, nil
+	case "drop":
+		return relay.SinkOverflowDrop, nil
+	case "end-session":
+		return relay.SinkOverflowEndSession, nil
+	default:
+		return 0, fmt.Errorf("unknown -sink-overflow %q; known: block, drop, end-session", name)
+	}
+}
+
+// reportSinkDrops says out loud that the core's queue lost a record.
+//
+// relay.Session.SinkDropped is a counter and nothing reads it on a consumer's
+// behalf: a Sink is handed an int64, and a session listing does not carry the
+// count either. So under -sink-overflow drop the loss is silent unless somebody
+// asks, and a capture missing a record still passes the replay gate — the digest
+// covers what was written, not what crossed the wire. The first live run of that
+// policy lost 783 records and said nothing at all;
+// docs/verification/2026-08-18-sink-policy-live.md is the run it said it on.
+//
+// It is wired only under that policy, since it is the only one that drops.
+func reportSinkDrops(logger *slog.Logger) relay.Hook {
+	var (
+		mu   sync.Mutex
+		seen = map[int64]uint64{}
+	)
+
+	return relay.HookFunc(func(_ context.Context, s *relay.Session, _ *relay.Message) (relay.Action, error) {
+		dropped := s.SinkDropped()
+
+		mu.Lock()
+		last, ok := seen[s.ID]
+		if !ok || dropped > last {
+			seen[s.ID] = dropped
+		}
+		mu.Unlock()
+
+		if dropped > last {
+			logger.Warn(
+				"sink dropped records",
+				slog.Int64("session", s.ID),
+				slog.Uint64("dropped", dropped),
+			)
+		}
 
 		return relay.Forward, nil
 	})

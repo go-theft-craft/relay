@@ -5,6 +5,48 @@ All notable changes to this module are recorded here. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html) — while the major
 version is `0`, a minor bump may break the API.
 
+## [Unreleased]
+
+### Added
+
+- `mcrelay` can run the core's sink policy: `-sink-overflow` picks `block`,
+  `drop`, or `end-session`, `-sink-queue` sizes the queue the last two use, and
+  `-record-queue` sizes the recorder's own. They exist because the policy added
+  in `0.4.0` had never been run against a real server, and a policy nobody can
+  run from a command line is a claim rather than a feature.
+
+  It also reports drops now. `relay.Session.SinkDropped` is a counter that
+  nothing reads on a consumer's behalf — a `Sink` is handed an int64, and
+  `SessionSnapshot` does not carry the count — so under `drop` the loss was
+  silent until a hook asked. The first run of that arm lost 783 records and said
+  nothing at all.
+
+### Changed
+
+- The capture recorder keeps its own queue, and the core's stays out of the
+  capture path. `docs/2026-08-17-enforce-the-sink-contract.md` parked this
+  pending a run against a real server;
+  `docs/verification/2026-08-18-sink-policy-live.md` is that run, in front of
+  vanilla 1.8.9 with a headless client.
+
+  Both mechanisms were made to fire and both left a recording that replays to
+  its own digest, so the deciding facts were the other ones: the recorder never
+  blocks, which means a slow disk fills its queue and never reaches the core's,
+  leaving the core's able to fire only on a burst that outruns a channel send —
+  at a copy per message per sink. And `SinkOverflowBlock` is the default, so a
+  consumer who configures nothing gets the recorder's queue and nothing else. A
+  capture's guarantee should not rest on a flag somebody else remembered to set.
+
+  Nothing in the core changed. `mcrelay` warns when both queues are configured,
+  because the smaller one silently decides which is running.
+
+- `examples/README.md` says what the replay gate is not. The digest covers what
+  was written, so a recording missing records still replays to its own digest:
+  the live run lost 783 records under `SinkOverflowDrop` and `verify` called the
+  file ok. What caught it was `trace`, refusing movement for an entity that
+  never spawned — which is luck about what the queue happened to drop, not a
+  check.
+
 ## [0.4.0] — 2026-08-18
 
 ### Added
